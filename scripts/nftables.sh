@@ -176,6 +176,36 @@ proto_display() {
     esac
 }
 
+# ============== UDP 可达性弱探测 ==============
+# 参数: $1=目标IP  $2=目标端口
+# 返回 0=可达（未收到 ICMP port-unreachable）
+# 返回 1=不可达（收到 ICMP 或无可用工具）
+# 注意: UDP 无连接，"可达"只代表端口未被显式关闭，不代表服务正常响应
+test_udp_reachable() {
+    local dip="$1" dport="$2"
+
+    # 方案 A: netcat (openbsd 版支持 -uz)
+    if command -v nc &>/dev/null; then
+        # -u UDP, -z 零 IO, -w1 等待 1 秒看是否回 ICMP
+        # 返回 0 = 没收到拒绝(视为可达); 非 0 = 收到 ICMP port-unreachable(不可达)
+        if nc -u -z -w1 "$dip" "$dport" 2>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+
+    # 方案 B: bash 原生 /dev/udp (bash 4+ 且内核支持)
+    # 发个空包，能写出去且 1 秒内没被 ICMP 拒绝即视为可达
+    if [[ -w /dev/null ]] && (echo -n "" >"/dev/udp/${dip}/${dport}") 2>/dev/null; then
+        sleep 0.2 2>/dev/null || true
+        # /dev/udp 无法可靠捕获 ICMP，只能确认"能发出去"
+        return 0
+    fi
+
+    # 两种工具都没有
+    return 1
+}
+
 # ============== firewalld / iptables 端口放行 ==============
 # 参数: $1=本机监听端口  $2=目标IP  $3=目标端口  $4=协议(tcp|udp|both，默认 both)
 firewall_open_port() {
@@ -772,14 +802,30 @@ do_diagnose() {
     if [[ ${#RULES[@]} -gt 0 ]]; then
         read -rp "是否测试目标连通性？[y/N]: " test_conn
         if [[ "$test_conn" =~ ^[Yy]$ ]]; then
-            local rule lport dip dport
+            local rule lport dip dport proto
             for rule in "${RULES[@]}"; do
-                IFS='|' read -r lport dip dport <<< "$rule"
-                printf "  测试 %s:%s (TCP) ... " "$dip" "$dport"
-                if timeout 3 bash -c ">/dev/tcp/${dip}/${dport}" 2>/dev/null; then
-                    printf "\033[32m通\033[0m\n"
-                else
-                    printf "\033[31m不通或超时\033[0m\n"
+                IFS='|' read -r lport dip dport proto <<< "$rule"
+                proto="${proto:-both}"
+
+                # TCP 测试：建立连接即视为通
+                if proto_has_tcp "$proto"; then
+                    printf "  测试 %s:%s (TCP) ... " "$dip" "$dport"
+                    if timeout 3 bash -c ">/dev/tcp/${dip}/${dport}" 2>/dev/null; then
+                        printf "\033[32m通\033[0m\n"
+                    else
+                        printf "\033[31m不通或超时\033[0m\n"
+                    fi
+                fi
+
+                # UDP 测试：UDP 无连接，只能做弱判定
+                if proto_has_udp "$proto"; then
+                    printf "  测试 %s:%s (UDP) ... " "$dip" "$dport"
+                    if test_udp_reachable "$dip" "$dport"; then
+                        printf "\033[32m可达\033[0m\n"
+                    else
+                        printf "\033[31m不可达\033[0m\n"
+                    fi
+                    warn "    UDP 无连接，'可达' 仅表示未收到 ICMP port-unreachable，不代表服务正常响应。"
                 fi
             done
         fi
