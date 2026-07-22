@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# nftables 端口转发管理工具 v1.2
+# nftables 端口转发管理工具 v1.3
 # 交互式管理 DNAT 端口转发规则（支持 TCP / UDP / TCP+UDP 选择）
 #
 
@@ -298,14 +298,12 @@ firewall_close_port() {
         if proto_has_udp "$proto"; then
             yes | ufw delete allow "${lport}/udp" >/dev/null 2>&1 || true
         fi
-        # route 规则按目标匹配，只有在没有其他规则共享同一目标时才删除
-        if [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport"; then
-            if proto_has_tcp "$proto"; then
-                yes | ufw route delete allow proto tcp to "${dest_ip}" port "${dport}" >/dev/null 2>&1 || true
-            fi
-            if proto_has_udp "$proto"; then
-                yes | ufw route delete allow proto udp to "${dest_ip}" port "${dport}" >/dev/null 2>&1 || true
-            fi
+        # route 规则按目标和协议匹配；仅在同协议未被其他转发复用时删除
+        if proto_has_tcp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" "tcp"; }; then
+            yes | ufw route delete allow proto tcp to "${dest_ip}" port "${dport}" >/dev/null 2>&1 || true
+        fi
+        if proto_has_udp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" "udp"; }; then
+            yes | ufw route delete allow proto udp to "${dest_ip}" port "${dport}" >/dev/null 2>&1 || true
         fi
         info "已从 UFW 中移除端口 ${lport} 的放行规则。"
         log_action "UFW 移除端口 ${lport}"
@@ -321,14 +319,12 @@ firewall_close_port() {
         if proto_has_udp "$proto"; then
             iptables -D INPUT -p udp --dport "${lport}" -j ACCEPT 2>/dev/null || true
         fi
-        # FORWARD 链: 只有在没有其他规则共享同一 dest_ip:dport 时才删除
-        if [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport"; then
-            if proto_has_tcp "$proto"; then
-                iptables -D FORWARD -d "${dest_ip}" -p tcp --dport "${dport}" -j ACCEPT 2>/dev/null || true
-            fi
-            if proto_has_udp "$proto"; then
-                iptables -D FORWARD -d "${dest_ip}" -p udp --dport "${dport}" -j ACCEPT 2>/dev/null || true
-            fi
+        # FORWARD 链: 只有同协议未被其他转发复用时才删除
+        if proto_has_tcp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" "tcp"; }; then
+            iptables -D FORWARD -d "${dest_ip}" -p tcp --dport "${dport}" -j ACCEPT 2>/dev/null || true
+        fi
+        if proto_has_udp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" "udp"; }; then
+            iptables -D FORWARD -d "${dest_ip}" -p udp --dport "${dport}" -j ACCEPT 2>/dev/null || true
         fi
         # 注意: 不删除 ESTABLISHED,RELATED 规则，它是通用规则，其他转发可能还需要
         info "已从 iptables 中移除: INPUT ${lport}, FORWARD → ${dest_ip}:${dport}。"
