@@ -821,7 +821,6 @@ do_diagnose() {
                     else
                         printf "\033[31m不可达\033[0m\n"
                     fi
-                    warn "    UDP 无连接，'可达' 仅表示未收到 ICMP port-unreachable，不代表服务正常响应。"
                 fi
             done
         fi
