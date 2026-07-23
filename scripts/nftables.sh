@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# nftables 端口转发管理工具 v1.5
+# nftables 端口转发管理工具 v1.6
 # 交互式管理 DNAT 端口转发规则（支持 TCP / UDP / TCP+UDP 选择）
 #
 
@@ -46,42 +46,94 @@ validate_port() {
     return 0
 }
 
-validate_ip() {
+validate_ipv4() {
     local ip="$1"
-    if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-        return 1
-    fi
-    # 拒绝前导零（避免 bash 八进制解析歧义，如 010 != 10）
-    if [[ "$ip" =~ (^|\.)0[0-9] ]]; then
-        return 1
-    fi
-    local IFS='.'
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    [[ "$ip" =~ (^|\.)0[0-9] ]] && return 1
+    local IFS='.' octet
     read -ra octets <<< "$ip"
-    for octet in "${octets[@]}"; do
-        if (( octet > 255 )); then
-            return 1
-        fi
-    done
+    for octet in "${octets[@]}"; do (( octet <= 255 )) || return 1; done
     return 0
 }
 
-# ============== 自动获取本机 IP ==============
+validate_ipv6() {
+    local ip="$1" work part count=0 compressed=false
+    [[ "$ip" == *:* && "$ip" =~ ^[0-9A-Fa-f:]+$ && "$ip" != *":::"* ]] || return 1
+    if [[ "$ip" == *"::"* ]]; then
+        [[ "${ip/::/}" != *"::"* ]] || return 1
+        compressed=true
+        work="${ip/::/:x:}"
+    else
+        work="$ip"
+    fi
+    local IFS=':'
+    read -ra parts <<< "$work"
+    for part in "${parts[@]}"; do
+        [[ -z "$part" ]] && continue
+        if [[ "$part" == "x" ]]; then
+            ((count++))
+            continue
+        fi
+        [[ "$part" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+        ((count++))
+    done
+    if $compressed; then
+        (( count < 8 ))
+    else
+        (( count == 8 ))
+    fi
+}
+
+ip_family() {
+    [[ "$1" == *:* ]] && echo "ipv6" || echo "ipv4"
+}
+
+family_display() {
+    [[ "$1" == "ipv6" ]] && echo "IPv6" || echo "IPv4"
+}
+
 get_local_ip() {
     local ip
-    # 优先取默认路由出口的 IP（最准确：这就是发包时实际使用的源 IP）
     ip=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1) || true
-    if [[ -n "$ip" ]]; then
-        echo "$ip"
-        return
-    fi
-    # 回退：取第一个非 lo 接口的 IP
+    [[ -n "$ip" ]] && { echo "$ip"; return; }
     ip=$(ip -4 addr show scope global 2>/dev/null | grep -oP 'inet \K[0-9.]+' | head -1) || true
-    if [[ -n "$ip" ]]; then
-        echo "$ip"
-        return
-    fi
-    # 最终回退
+    [[ -n "$ip" ]] && { echo "$ip"; return; }
     hostname -I 2>/dev/null | awk '{print $1}' || true
+}
+
+get_local_ipv6() {
+    local ip
+    ip=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '/ src / {for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}') || true
+    validate_ipv6 "$ip" && echo "$ip"
+}
+
+has_usable_ipv6() {
+    [[ -n "$(get_local_ipv6)" ]]
+}
+
+choose_ip_family() {
+    local default="${1:-}" choice
+    while true; do
+        echo "请选择 IP 类型:"
+        echo "  1) IPv4"
+        if has_usable_ipv6; then
+            echo "  2) IPv6"
+        else
+            echo "  2) IPv6（本机未检测到 IPv6）"
+        fi
+        read -rp "请选择 [1-2${default:+，默认 ${default}}]: " choice
+        choice="${choice:-$default}"
+        case "$choice" in
+            1|ipv4|IPv4) echo "ipv4"; return ;;
+            2|ipv6|IPv6)
+                if has_usable_ipv6; then
+                    echo "ipv6"; return
+                fi
+                err "本机未检测到可用 IPv6，无法创建 IPv6 转发规则。"
+                ;;
+            *) err "无效选择，请输入 1 或 2。" ;;
+        esac
+    done
 }
 
 # ============== 发行版检测 ==============
@@ -103,6 +155,10 @@ detect_pkg_manager() {
 # 不依赖 systemd 服务，而是检测命令是否存在且能读取规则
 has_iptables() {
     command -v iptables &>/dev/null && iptables -S &>/dev/null
+}
+
+has_ip6tables() {
+    command -v ip6tables &>/dev/null && ip6tables -S &>/dev/null
 }
 
 # ============== iptables 规则持久化尝试 ==============
@@ -132,19 +188,10 @@ dest_still_used() {
     for rule in "${RULES[@]}"; do
         IFS='|' read -r lport dip dport proto note <<< "$rule"
         proto="${proto:-both}"
-        # 跳过正在删除的那条
         [[ "$lport" == "$exclude_lport" ]] && continue
-        # 如果其他规则也指向同一 dest_ip:dport，返回 true
-        if [[ "$dip" == "$check_ip" && "$dport" == "$check_dport" ]]; then
-            # 未指定协议维度时，只要有任何规则复用目标即视为仍在使用
-            if [[ -z "$exclude_proto" ]]; then
-                return 0
-            fi
-            # 指定协议维度：被删规则用到的协议仍被其他规则用到才算共享
-            if { proto_has_tcp "$exclude_proto" && proto_has_tcp "$proto"; } || \
-               { proto_has_udp "$exclude_proto" && proto_has_udp "$proto"; }; then
-                return 0
-            fi
+        [[ "$dip" == "$check_ip" && "$dport" == "$check_dport" ]] || continue
+        if [[ -z "$exclude_proto" ]] ||            { proto_has_tcp "$exclude_proto" && proto_has_tcp "$proto"; } ||            { proto_has_udp "$exclude_proto" && proto_has_udp "$proto"; }; then
+            return 0
         fi
     done
     return 1
@@ -210,126 +257,84 @@ test_udp_reachable() {
 # 参数: $1=本机监听端口  $2=目标IP  $3=目标端口  $4=协议(tcp|udp|both，默认 both)
 firewall_open_port() {
     local lport="$1" dest_ip="$2" dport="$3" proto="${4:-both}"
-
-    local disp
+    local family cmd disp
+    family=$(ip_family "$dest_ip")
     disp=$(proto_display "$proto")
 
-    # firewalld 优先：如果 firewalld 在运行，只用 firewall-cmd，不碰 iptables
-    # （firewalld 可能以 iptables 为后端，手动插 iptables 规则会被 reload 冲掉）
     if systemctl is-active --quiet firewalld 2>/dev/null; then
         if proto_has_tcp "$proto"; then
-            firewall-cmd --add-port="${lport}/tcp" --permanent >/dev/null 2>&1 || true
+            firewall-cmd --permanent --add-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"tcp\" accept" >/dev/null 2>&1 || true
         fi
         if proto_has_udp "$proto"; then
-            firewall-cmd --add-port="${lport}/udp" --permanent >/dev/null 2>&1 || true
+            firewall-cmd --permanent --add-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"udp\" accept" >/dev/null 2>&1 || true
         fi
         firewall-cmd --reload >/dev/null 2>&1 || true
-        info "已在 firewalld 中放行端口 ${lport} (${disp})。"
-        log_action "firewalld 放行端口 ${lport} (${disp})"
+        info "已在 firewalld 中放行 IPv${family#ipv} 端口 ${lport} (${disp})。"
         return
     fi
 
-    # UFW: Ubuntu 小白最常见的防火墙
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qw "active"; then
-        # INPUT: 放行进入本机的流量
         if proto_has_tcp "$proto"; then
-            ufw allow "${lport}/tcp" >/dev/null 2>&1 || true
-            ufw route allow proto tcp to "${dest_ip}" port "${dport}" >/dev/null 2>&1 || true
+            ufw route allow proto tcp to "$dest_ip" port "$dport" >/dev/null 2>&1 || true
         fi
         if proto_has_udp "$proto"; then
-            ufw allow "${lport}/udp" >/dev/null 2>&1 || true
-            ufw route allow proto udp to "${dest_ip}" port "${dport}" >/dev/null 2>&1 || true
+            ufw route allow proto udp to "$dest_ip" port "$dport" >/dev/null 2>&1 || true
         fi
-        info "已在 UFW 中放行端口 ${lport} 及转发到 ${dest_ip}:${dport} (${disp})。"
-        log_action "UFW 放行端口 ${lport} 转发到 ${dest_ip}:${dport} (${disp})"
+        info "已在 UFW 中放行 IPv${family#ipv} 转发到 ${dest_ip}:${dport} (${disp})。"
         return
     fi
 
-    # 无 firewalld / UFW，检测 iptables
-    if has_iptables; then
-        # INPUT 链: 放行进入本机的流量（匹配 DNAT 前的本机端口）
-        if proto_has_tcp "$proto"; then
-            iptables -C INPUT -p tcp --dport "${lport}" -j ACCEPT 2>/dev/null || \
-                iptables -I INPUT -p tcp --dport "${lport}" -j ACCEPT 2>/dev/null || true
-            iptables -C FORWARD -d "${dest_ip}" -p tcp --dport "${dport}" -j ACCEPT 2>/dev/null || \
-                iptables -I FORWARD -d "${dest_ip}" -p tcp --dport "${dport}" -j ACCEPT 2>/dev/null || true
-        fi
-        if proto_has_udp "$proto"; then
-            iptables -C INPUT -p udp --dport "${lport}" -j ACCEPT 2>/dev/null || \
-                iptables -I INPUT -p udp --dport "${lport}" -j ACCEPT 2>/dev/null || true
-            iptables -C FORWARD -d "${dest_ip}" -p udp --dport "${dport}" -j ACCEPT 2>/dev/null || \
-                iptables -I FORWARD -d "${dest_ip}" -p udp --dport "${dport}" -j ACCEPT 2>/dev/null || true
-        fi
-        # FORWARD 链: 放行回程已建立连接的包（DNAT 转发场景标配）
-        iptables -C FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
-            iptables -I FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
-        info "已在 iptables 中放行: INPUT ${lport}, FORWARD → ${dest_ip}:${dport} (${disp})。"
-        log_action "iptables 放行 INPUT:${lport} FORWARD:${dest_ip}:${dport} (${disp})"
-        if ! try_persist_iptables; then
-            warn "iptables 规则已生效但未能自动持久化，重启后可能丢失。"
-            warn "如需持久化请安装 iptables-persistent / netfilter-persistent。"
-        fi
+    if [[ "$family" == "ipv6" ]]; then
+        cmd="ip6tables"
+        has_ip6tables || return
+    else
+        cmd="iptables"
+        has_iptables || return
     fi
+
+    if proto_has_tcp "$proto"; then
+        $cmd -C INPUT -p tcp --dport "$lport" -j ACCEPT 2>/dev/null || $cmd -I INPUT -p tcp --dport "$lport" -j ACCEPT 2>/dev/null || true
+        $cmd -C FORWARD -d "$dest_ip" -p tcp --dport "$dport" -j ACCEPT 2>/dev/null || $cmd -I FORWARD -d "$dest_ip" -p tcp --dport "$dport" -j ACCEPT 2>/dev/null || true
+    fi
+    if proto_has_udp "$proto"; then
+        $cmd -C INPUT -p udp --dport "$lport" -j ACCEPT 2>/dev/null || $cmd -I INPUT -p udp --dport "$lport" -j ACCEPT 2>/dev/null || true
+        $cmd -C FORWARD -d "$dest_ip" -p udp --dport "$dport" -j ACCEPT 2>/dev/null || $cmd -I FORWARD -d "$dest_ip" -p udp --dport "$dport" -j ACCEPT 2>/dev/null || true
+    fi
+    $cmd -C FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || $cmd -I FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    info "已在 ${cmd} 中放行 IPv${family#ipv} 转发端口 ${lport} (${disp})。"
 }
 
-# 参数: $1=本机监听端口  $2=目标IP  $3=目标端口  $4=协议(tcp|udp|both，默认 both)  $5=是否跳过共享检查("force" 表示强制删除)
 firewall_close_port() {
     local lport="$1" dest_ip="$2" dport="$3" proto="${4:-both}" force="${5:-}"
+    local family cmd
+    family=$(ip_family "$dest_ip")
 
-    # firewalld
     if systemctl is-active --quiet firewalld 2>/dev/null; then
-        if proto_has_tcp "$proto"; then
-            firewall-cmd --remove-port="${lport}/tcp" --permanent >/dev/null 2>&1 || true
-        fi
-        if proto_has_udp "$proto"; then
-            firewall-cmd --remove-port="${lport}/udp" --permanent >/dev/null 2>&1 || true
-        fi
+        proto_has_tcp "$proto" && firewall-cmd --permanent --remove-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"tcp\" accept" >/dev/null 2>&1 || true
+        proto_has_udp "$proto" && firewall-cmd --permanent --remove-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"udp\" accept" >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1 || true
-        info "已从 firewalld 中移除端口 ${lport} 的放行规则。"
-        log_action "firewalld 移除端口 ${lport}"
         return
     fi
 
-    # UFW（用 yes 管道防止 ufw delete 交互询问卡住脚本）
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qw "active"; then
-        if proto_has_tcp "$proto"; then
-            yes | ufw delete allow "${lport}/tcp" >/dev/null 2>&1 || true
+        if proto_has_tcp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" tcp; }; then
+            yes | ufw route delete allow proto tcp to "$dest_ip" port "$dport" >/dev/null 2>&1 || true
         fi
-        if proto_has_udp "$proto"; then
-            yes | ufw delete allow "${lport}/udp" >/dev/null 2>&1 || true
+        if proto_has_udp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" udp; }; then
+            yes | ufw route delete allow proto udp to "$dest_ip" port "$dport" >/dev/null 2>&1 || true
         fi
-        # route 规则按目标和协议匹配；仅在同协议未被其他转发复用时删除
-        if proto_has_tcp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" "tcp"; }; then
-            yes | ufw route delete allow proto tcp to "${dest_ip}" port "${dport}" >/dev/null 2>&1 || true
-        fi
-        if proto_has_udp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" "udp"; }; then
-            yes | ufw route delete allow proto udp to "${dest_ip}" port "${dport}" >/dev/null 2>&1 || true
-        fi
-        info "已从 UFW 中移除端口 ${lport} 的放行规则。"
-        log_action "UFW 移除端口 ${lport}"
         return
     fi
 
-    # iptables
-    if has_iptables; then
-        # INPUT 链: 总是删除（lport 是唯一的）
-        if proto_has_tcp "$proto"; then
-            iptables -D INPUT -p tcp --dport "${lport}" -j ACCEPT 2>/dev/null || true
-        fi
-        if proto_has_udp "$proto"; then
-            iptables -D INPUT -p udp --dport "${lport}" -j ACCEPT 2>/dev/null || true
-        fi
-        # FORWARD 链: 只有同协议未被其他转发复用时才删除
-        if proto_has_tcp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" "tcp"; }; then
-            iptables -D FORWARD -d "${dest_ip}" -p tcp --dport "${dport}" -j ACCEPT 2>/dev/null || true
-        fi
-        if proto_has_udp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" "udp"; }; then
-            iptables -D FORWARD -d "${dest_ip}" -p udp --dport "${dport}" -j ACCEPT 2>/dev/null || true
-        fi
-        # 注意: 不删除 ESTABLISHED,RELATED 规则，它是通用规则，其他转发可能还需要
-        info "已从 iptables 中移除: INPUT ${lport}, FORWARD → ${dest_ip}:${dport}。"
-        log_action "iptables 移除 INPUT:${lport} FORWARD:${dest_ip}:${dport}"
-        try_persist_iptables || true
+    if [[ "$family" == "ipv6" ]]; then cmd="ip6tables"; else cmd="iptables"; fi
+    command -v "$cmd" &>/dev/null || return
+    proto_has_tcp "$proto" && $cmd -D INPUT -p tcp --dport "$lport" -j ACCEPT 2>/dev/null || true
+    proto_has_udp "$proto" && $cmd -D INPUT -p udp --dport "$lport" -j ACCEPT 2>/dev/null || true
+    if proto_has_tcp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" tcp; }; then
+        $cmd -D FORWARD -d "$dest_ip" -p tcp --dport "$dport" -j ACCEPT 2>/dev/null || true
+    fi
+    if proto_has_udp "$proto" && { [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" udp; }; then
+        $cmd -D FORWARD -d "$dest_ip" -p udp --dport "$dport" -j ACCEPT 2>/dev/null || true
     fi
 }
 
@@ -403,7 +408,7 @@ NFTCONF
     fi
 }
 
-# ============== 写出配置文件（基于当前 RULES 数组） ==============
+# ============== 写出配置文件（IPv4 / IPv6 规则按目标地址自动分表） ==============
 # RULES 数组格式: "本机端口|目标IP|目标端口|协议(tcp|udp|both)|备注"
 declare -a RULES=()
 
@@ -417,47 +422,33 @@ sanitize_note() {
 
 load_rules() {
     RULES=()
-    if [[ ! -f "${CONF_FILE}" ]]; then
-        return
-    fi
+    [[ -f "${CONF_FILE}" ]] || return
 
-    local line p lport dip dport pending_note=""
-
+    local line p lport dip dport pending_note="" current_family="ipv4"
     while IFS= read -r line; do
-        # 兼容 v1.2 以及本版本写入的备注
+        [[ "$line" =~ ^table[[:space:]]+ip6[[:space:]] ]] && { current_family="ipv6"; continue; }
+        [[ "$line" =~ ^table[[:space:]]+ip[[:space:]] ]] && { current_family="ipv4"; continue; }
         if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*备注:[[:space:]]*(.*)$ ]]; then
             pending_note=$(sanitize_note "${BASH_REMATCH[1]}")
             continue
         fi
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        if [[ "$line" =~ (tcp|udp)\ dport\ ([0-9]+)\ dnat\ to\ ([0-9.]+):([0-9]+) ]]; then
-            p="${BASH_REMATCH[1]}"
-            lport="${BASH_REMATCH[2]}"
-            dip="${BASH_REMATCH[3]}"
-            dport="${BASH_REMATCH[4]}"
+        if [[ "$line" =~ (tcp|udp)[[:space:]]+dport[[:space:]]+([0-9]+)[[:space:]]+dnat[[:space:]]+to[[:space:]]+\[?([0-9A-Fa-f:.]+)\]?:([0-9]+) ]]; then
+            p="${BASH_REMATCH[1]}"; lport="${BASH_REMATCH[2]}"; dip="${BASH_REMATCH[3]}"; dport="${BASH_REMATCH[4]}"
+            [[ "$(ip_family "$dip")" == "$current_family" ]] || continue
 
-            # 同一监听端口的 tcp/udp 行合并成一条规则；备注保存在数组中，支持空格
             local idx=-1 i old_lport old_dip old_dport old_proto old_note
-            for ((i = 0; i < ${#RULES[@]}; i++)); do
+            for ((i=0; i<${#RULES[@]}; i++)); do
                 IFS='|' read -r old_lport old_dip old_dport old_proto old_note <<< "${RULES[$i]}"
-                if [[ "$old_lport" == "$lport" ]]; then
-                    idx=$i
-                    break
-                fi
+                if [[ "$old_lport" == "$lport" && "$(ip_family "$old_dip")" == "$current_family" ]]; then idx=$i; break; fi
             done
-
             if (( idx < 0 )); then
                 RULES+=("${lport}|${dip}|${dport}|${p}|${pending_note}")
             else
                 old_proto="${old_proto:-both}"
-                local merged_proto="$old_proto"
-                if [[ "$old_proto" != "both" && "$old_proto" != "$p" ]]; then
-                    merged_proto="both"
-                fi
-                if [[ -z "$old_note" ]]; then
-                    old_note="$pending_note"
-                fi
-                RULES[$idx]="${old_lport}|${old_dip}|${old_dport}|${merged_proto}|${old_note}"
+                [[ "$old_proto" != "both" && "$old_proto" != "$p" ]] && old_proto="both"
+                [[ -z "$old_note" ]] && old_note="$pending_note"
+                RULES[$idx]="${old_lport}|${old_dip}|${old_dport}|${old_proto}|${old_note}"
             fi
             pending_note=""
         fi
@@ -465,90 +456,105 @@ load_rules() {
 }
 
 write_conf_file() {
-    local local_ip
-    local_ip=$(get_local_ip)
-
-    if [[ -z "$local_ip" ]]; then
-        err "无法获取本机 IP 地址，请检查网络配置。"
-        return 1
+    local local_ip="" local_ip6="" has_v4=false has_v6=false rule lport dip dport proto note
+    for rule in "${RULES[@]}"; do
+        IFS='|' read -r lport dip dport proto note <<< "$rule"
+        [[ "$(ip_family "$dip")" == "ipv6" ]] && has_v6=true || has_v4=true
+    done
+    if $has_v4; then
+        local_ip=$(get_local_ip)
+        [[ -n "$local_ip" ]] || { err "无法获取本机 IPv4 地址。"; return 1; }
+    fi
+    if $has_v6; then
+        local_ip6=$(get_local_ipv6)
+        [[ -n "$local_ip6" ]] || { err "本机未检测到可用 IPv6，无法写入 IPv6 转发规则。"; return 1; }
     fi
 
-    # 先写入临时文件，成功后原子替换，避免写到一半断电导致配置损坏
     local tmp_file="${CONF_FILE}.tmp.$$"
-
     cat > "${tmp_file}" <<EOF
 #!/usr/sbin/nft -f
+# 由 nftables 端口转发管理工具 v1.6 自动生成。
+EOF
 
-# --- 本机 IP（自动获取，用于 SNAT 回源）
+    if $has_v4; then
+        cat >> "${tmp_file}" <<EOF
 define LOCAL_IP = ${local_ip}
 
 table ip ${TABLE_NAME} {
-    # --- PREROUTING (DNAT) ---
     chain prerouting {
         type nat hook prerouting priority -100; policy accept;
 EOF
-
-    local rule lport dip dport proto note
-    for rule in "${RULES[@]}"; do
-        IFS='|' read -r lport dip dport proto note <<< "$rule"
-        proto="${proto:-both}"
-        {
-            echo ""
-            echo "        # 转发: 本机:${lport} ($(proto_display "$proto")) -> ${dip}:${dport}"
-            [[ -n "$note" ]] && echo "        # 备注: ${note}"
-            if proto_has_tcp "$proto"; then
-                echo "        tcp dport ${lport} dnat to ${dip}:${dport}"
-            fi
-            if proto_has_udp "$proto"; then
-                echo "        udp dport ${lport} dnat to ${dip}:${dport}"
-            fi
-        } >> "${tmp_file}"
-    done
-
-    cat >> "${tmp_file}" <<EOF
+        for rule in "${RULES[@]}"; do
+            IFS='|' read -r lport dip dport proto note <<< "$rule"
+            [[ "$(ip_family "$dip")" == "ipv4" ]] || continue
+            {
+                echo ""
+                echo "        # 转发: IPv4 本机:${lport} ($(proto_display "${proto:-both}")) -> ${dip}:${dport}"
+                [[ -n "$note" ]] && echo "        # 备注: ${note}"
+                proto_has_tcp "${proto:-both}" && echo "        tcp dport ${lport} dnat to ${dip}:${dport}"
+                proto_has_udp "${proto:-both}" && echo "        udp dport ${lport} dnat to ${dip}:${dport}"
+            } >> "${tmp_file}"
+        done
+        cat >> "${tmp_file}" <<EOF
     }
-
-    # --- POSTROUTING (SNAT) ---
     chain postrouting {
         type nat hook postrouting priority 100; policy accept;
 EOF
-
-    for rule in "${RULES[@]}"; do
-        IFS='|' read -r lport dip dport proto note <<< "$rule"
-        proto="${proto:-both}"
-        {
-            echo ""
-            echo "        # 回源: 发往 ${dip}:${dport} 的已 DNAT 流量, SNAT 为本机 IP"
-            if proto_has_tcp "$proto"; then
-                echo "        ip daddr ${dip} tcp dport ${dport} ct status dnat snat to \$LOCAL_IP"
-            fi
-            if proto_has_udp "$proto"; then
-                echo "        ip daddr ${dip} udp dport ${dport} ct status dnat snat to \$LOCAL_IP"
-            fi
-        } >> "${tmp_file}"
-    done
-
-    cat >> "${tmp_file}" <<EOF
-    }
-}
-EOF
-
-    # 原子替换
-    mv -f "${tmp_file}" "${CONF_FILE}" 2>/dev/null || {
-        err "无法写入配置文件 ${CONF_FILE}"
-        rm -f "${tmp_file}" 2>/dev/null || true
-        return 1
-    }
-}
-
-# ============== 重新加载规则 ==============
-reload_rules() {
-    nft flush table ip "${TABLE_NAME}" 2>/dev/null || true
-    nft delete table ip "${TABLE_NAME}" 2>/dev/null || true
-    if ! nft -f "${CONF_FILE}"; then
-        err "加载配置文件失败，请检查 ${CONF_FILE}"
-        return 1
+        for rule in "${RULES[@]}"; do
+            IFS='|' read -r lport dip dport proto note <<< "$rule"
+            [[ "$(ip_family "$dip")" == "ipv4" ]] || continue
+            {
+                proto_has_tcp "${proto:-both}" && echo "        ip daddr ${dip} tcp dport ${dport} ct status dnat snat to \$LOCAL_IP"
+                proto_has_udp "${proto:-both}" && echo "        ip daddr ${dip} udp dport ${dport} ct status dnat snat to \$LOCAL_IP"
+            } >> "${tmp_file}"
+        done
+        echo "    }" >> "${tmp_file}"
+        echo "}" >> "${tmp_file}"
     fi
+
+    if $has_v6; then
+        cat >> "${tmp_file}" <<EOF
+define LOCAL_IP6 = ${local_ip6}
+
+table ip6 ${TABLE_NAME} {
+    chain prerouting {
+        type nat hook prerouting priority -100; policy accept;
+EOF
+        for rule in "${RULES[@]}"; do
+            IFS='|' read -r lport dip dport proto note <<< "$rule"
+            [[ "$(ip_family "$dip")" == "ipv6" ]] || continue
+            {
+                echo ""
+                echo "        # 转发: IPv6 本机:${lport} ($(proto_display "${proto:-both}")) -> [${dip}]:${dport}"
+                [[ -n "$note" ]] && echo "        # 备注: ${note}"
+                proto_has_tcp "${proto:-both}" && echo "        tcp dport ${lport} dnat to [${dip}]:${dport}"
+                proto_has_udp "${proto:-both}" && echo "        udp dport ${lport} dnat to [${dip}]:${dport}"
+            } >> "${tmp_file}"
+        done
+        cat >> "${tmp_file}" <<EOF
+    }
+    chain postrouting {
+        type nat hook postrouting priority 100; policy accept;
+EOF
+        for rule in "${RULES[@]}"; do
+            IFS='|' read -r lport dip dport proto note <<< "$rule"
+            [[ "$(ip_family "$dip")" == "ipv6" ]] || continue
+            {
+                proto_has_tcp "${proto:-both}" && echo "        ip6 daddr ${dip} tcp dport ${dport} ct status dnat snat to \$LOCAL_IP6"
+                proto_has_udp "${proto:-both}" && echo "        ip6 daddr ${dip} udp dport ${dport} ct status dnat snat to \$LOCAL_IP6"
+            } >> "${tmp_file}"
+        done
+        echo "    }" >> "${tmp_file}"
+        echo "}" >> "${tmp_file}"
+    fi
+
+    mv -f "${tmp_file}" "${CONF_FILE}" 2>/dev/null || { err "无法写入配置文件 ${CONF_FILE}"; rm -f "${tmp_file}" 2>/dev/null || true; return 1; }
+}
+
+reload_rules() {
+    nft delete table ip "${TABLE_NAME}" 2>/dev/null || true
+    nft delete table ip6 "${TABLE_NAME}" 2>/dev/null || true
+    nft -f "${CONF_FILE}" || { err "加载配置文件失败，请检查 ${CONF_FILE}"; return 1; }
     return 0
 }
 
@@ -783,7 +789,7 @@ show_service_persistence_status() {
         warn "转发配置文件: 不存在"
     fi
 
-    if command -v nft &>/dev/null && nft list table ip "${TABLE_NAME}" &>/dev/null; then
+    if command -v nft &>/dev/null && { nft list table ip "${TABLE_NAME}" &>/dev/null || nft list table ip6 "${TABLE_NAME}" &>/dev/null; }; then
         info "运行中转发表: 已加载"
     else
         warn "运行中转发表: 未加载"
@@ -1139,16 +1145,14 @@ do_install() {
 # 功能 2：查看现有端口转发
 # ====================================================
 print_rules() {
-    printf "\n\033[1m%-6s %-10s %-10s    %-22s %s\033[0m\n" "序号" "协议" "本机端口" "目标地址" "备注"
-    echo "────────────────────────────────────────────────────────────────────────"
-
-    local idx=1
-    local rule lport dip dport proto note shown_note
+    printf "\n\033[1m%-6s %-8s %-10s %-10s    %-28s %s\033[0m\n" "序号" "IP类型" "协议" "本机端口" "目标地址" "备注"
+    echo "────────────────────────────────────────────────────────────────────────────────"
+    local idx=1 rule lport dip dport proto note
     for rule in "${RULES[@]}"; do
         IFS='|' read -r lport dip dport proto note <<< "$rule"
-        shown_note="${note:--}"
-        printf "%-6s %-10s %-10s -> %-22s %s\n" \
-            "$idx" "$(proto_display "${proto:-both}")" "$lport" "${dip}:${dport}" "$shown_note"
+        local target="${dip}:${dport}"
+        [[ "$(ip_family "$dip")" == "ipv6" ]] && target="[${dip}]:${dport}"
+        printf "%-6s %-8s %-10s %-10s -> %-28s %s\n" "$idx" "$(family_display "$(ip_family "$dip")")" "$(proto_display "${proto:-both}")" "$lport" "$target" "${note:--}"
         ((idx++))
     done
     echo ""
@@ -1157,13 +1161,7 @@ print_rules() {
 do_list() {
     echo ""
     load_rules
-
-    if [[ ${#RULES[@]} -eq 0 ]]; then
-        info "当前没有端口转发规则。"
-        return
-    fi
-
-    print_rules
+    [[ ${#RULES[@]} -gt 0 ]] && print_rules || info "当前没有端口转发规则。"
 }
 
 # ====================================================
@@ -1171,116 +1169,63 @@ do_list() {
 # ====================================================
 do_add() {
     echo ""
-    if ! command -v nft &>/dev/null; then
-        err "nftables 未安装，请先选择 [1] 安装。"
-        return
-    fi
-
+    command -v nft &>/dev/null || { err "nftables 未安装，请先选择 [1] 安装。"; return; }
     init_conf || return
-    enable_ip_forward
     load_rules
 
-    local local_ip
-    local_ip=$(get_local_ip)
-    if [[ -z "$local_ip" ]]; then
-        err "无法获取本机 IP 地址，请检查网络配置。"
-        return
-    fi
+    local family lport proto proto_choice dip dport note rule rp existing_dip
+    family=$(choose_ip_family)
+    [[ "$family" == "ipv6" ]] && enable_ip6_forward || enable_ip_forward
 
-    # 输入本机端口
-    local lport
     while true; do
         read -rp "请输入本机监听端口 (1-65535): " lport
-        if validate_port "$lport"; then
-            break
-        fi
+        validate_port "$lport" && break
         err "端口无效，请输入 1-65535 之间的数字。"
     done
-
-    # 选择协议
-    local proto
     while true; do
         echo "请选择转发协议:"
         echo "  1) TCP"
         echo "  2) UDP"
         echo "  3) TCP + UDP"
         read -rp "请选择 [1-3，默认 3]: " proto_choice
-        proto_choice="${proto_choice:-3}"
-        proto=$(normalize_proto "$proto_choice")
-        if [[ -n "$proto" ]]; then
-            break
-        fi
+        proto=$(normalize_proto "${proto_choice:-3}")
+        [[ -n "$proto" ]] && break
         err "无效选择，请输入 1、2 或 3。"
     done
-
-    # 检查端口是否已有转发规则
-    local rule rp
     for rule in "${RULES[@]}"; do
-        IFS='|' read -r rp _ _ <<< "$rule"
-        if [[ "$rp" == "$lport" ]]; then
-            err "本机端口 ${lport} 已存在转发规则，请先删除后再添加。"
-            return
-        fi
+        IFS='|' read -r rp existing_dip _ <<< "$rule"
+        [[ "$rp" == "$lport" && "$(ip_family "$existing_dip")" == "$family" ]] && { err "该 $(family_display "$family") 监听端口已存在转发规则。"; return; }
     done
+    check_port_conflict "$lport" || { info "已取消。"; return; }
 
-    # 检查端口占用（TCP + UDP）
-    if ! check_port_conflict "$lport"; then
-        info "已取消。"
-        return
-    fi
-
-    # 输入目标 IP
-    local dip
     while true; do
-        read -rp "请输入目标 IP 地址: " dip
-        if validate_ip "$dip"; then
-            break
-        fi
-        err "IP 地址格式无效，请重新输入（如 192.168.1.100，不含前导零）。"
+        read -rp "请输入目标 $(family_display "$family") 地址: " dip
+        if [[ "$family" == "ipv6" ]]; then validate_ipv6 "$dip"; else validate_ipv4 "$dip"; fi && break
+        err "IP 地址格式无效，请重新输入。"
     done
-
-    # 输入目标端口
-    local dport
     while true; do
         read -rp "请输入目标端口 (1-65535) [默认: ${lport}]: " dport
         dport="${dport:-$lport}"
-        if validate_port "$dport"; then
-            break
-        fi
+        validate_port "$dport" && break
         err "端口无效，请输入 1-65535 之间的数字。"
     done
-
-    # 输入备注
-    local note
     read -rp "请输入备注（可留空）: " note
-    if [[ "$note" == *"|"* ]]; then
-        warn "备注中的 | 已替换为空格。"
-    fi
     note=$(sanitize_note "$note")
 
-    # 确认
     echo ""
-    echo "即将添加转发规则:"
-    echo "  本机端口 ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
+    echo "即将添加 $(family_display "$family") 转发规则:"
+    [[ "$family" == "ipv6" ]] && echo "  本机端口 ${lport} ($(proto_display "$proto")) → [${dip}]:${dport}" || echo "  本机端口 ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
     [[ -n "$note" ]] && echo "  备注: ${note}"
     read -rp "确认添加？[Y/n]: " confirm
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
-        info "已取消。"
-        return
-    fi
+    [[ "$confirm" =~ ^[Nn]$ ]] && { info "已取消。"; return; }
 
-    # 备份并写入
     backup_conf
     RULES+=("${lport}|${dip}|${dport}|${proto}|${note}")
-    if ! write_conf_file; then
-        return
-    fi
-
+    write_conf_file || return
     if reload_rules; then
         firewall_open_port "$lport" "$dip" "$dport" "$proto"
-        info "转发规则添加成功: ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
-        log_action "新增转发: ${lport} ($(proto_display "$proto")) -> ${dip}:${dport} 备注:${note:-无}"
-        info "若转发不通，请使用菜单中的【诊断/自检】排查。"
+        info "转发规则添加成功。"
+        log_action "新增 $(family_display "$family") 转发: ${lport} -> ${dip}:${dport}"
     else
         err "规则加载失败，请检查配置。"
     fi
@@ -1291,131 +1236,74 @@ do_add() {
 # ====================================================
 do_edit() {
     echo ""
-    if ! command -v nft &>/dev/null; then
-        err "nftables 未安装，请先选择 [1] 安装。"
-        return
-    fi
-
+    command -v nft &>/dev/null || { err "nftables 未安装，请先选择 [1] 安装。"; return; }
     load_rules
-    if [[ ${#RULES[@]} -eq 0 ]]; then
-        info "当前没有端口转发规则，无需修改。"
-        return
-    fi
-
+    [[ ${#RULES[@]} -gt 0 ]] || { info "当前没有端口转发规则，无需修改。"; return; }
     print_rules
-    local choice
-    read -rp "请输入要修改的序号 (0 取消): " choice
-    if [[ "$choice" == "0" ]] || [[ -z "$choice" ]]; then
-        info "已取消。"
-        return
-    fi
-    if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#RULES[@]} )); then
-        err "无效的序号。"
-        return
-    fi
 
-    local idx=$((choice - 1)) target
-    target="${RULES[$idx]}"
-    local old_lport old_dip old_dport old_proto old_note
+    local choice idx target old_lport old_dip old_dport old_proto old_note old_family family lport dip dport proto proto_choice note_input note rule rp existing_dip
+    read -rp "请输入要修改的序号 (0 取消): " choice
+    [[ "$choice" == "0" || -z "$choice" ]] && { info "已取消。"; return; }
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#RULES[@]} )) || { err "无效的序号。"; return; }
+
+    idx=$((choice - 1)); target="${RULES[$idx]}"
     IFS='|' read -r old_lport old_dip old_dport old_proto old_note <<< "$target"
-    old_proto="${old_proto:-both}"
+    old_proto="${old_proto:-both}"; old_family=$(ip_family "$old_dip")
 
     echo "留空保留当前值。"
-    local lport dip dport proto proto_choice note_input note
+    family=$(choose_ip_family "$([[ "$old_family" == "ipv6" ]] && echo 2 || echo 1)")
+    [[ "$family" == "ipv6" ]] && enable_ip6_forward || enable_ip_forward
+
     read -rp "本机监听端口 [${old_lport}]: " lport
     lport="${lport:-$old_lport}"
-    if ! validate_port "$lport"; then
-        err "端口无效，请输入 1-65535 之间的数字。"
-        return
-    fi
-
-    if [[ "$lport" != "$old_lport" ]]; then
-        local i rp
-        for ((i = 0; i < ${#RULES[@]}; i++)); do
-            (( i == idx )) && continue
-            IFS='|' read -r rp _ _ _ _ <<< "${RULES[$i]}"
-            if [[ "$rp" == "$lport" ]]; then
-                err "本机端口 ${lport} 已存在转发规则。"
-                return
-            fi
-        done
-        if ! check_port_conflict "$lport"; then
-            info "已取消。"
-            return
-        fi
-    fi
+    validate_port "$lport" || { err "端口无效。"; return; }
+    for ((i=0; i<${#RULES[@]}; i++)); do
+        (( i == idx )) && continue
+        IFS='|' read -r rp existing_dip _ <<< "${RULES[$i]}"
+        [[ "$rp" == "$lport" && "$(ip_family "$existing_dip")" == "$family" ]] && { err "该 $(family_display "$family") 监听端口已存在规则。"; return; }
+    done
+    [[ "$lport" == "$old_lport" ]] || check_port_conflict "$lport" || { info "已取消。"; return; }
 
     while true; do
         read -rp "协议 [1 TCP/2 UDP/3 TCP+UDP，当前 $(proto_display "$old_proto")]: " proto_choice
-        if [[ -z "$proto_choice" ]]; then
-            proto="$old_proto"
-            break
-        fi
+        [[ -z "$proto_choice" ]] && { proto="$old_proto"; break; }
         proto=$(normalize_proto "$proto_choice")
-        if [[ -n "$proto" ]]; then
-            break
-        fi
+        [[ -n "$proto" ]] && break
         err "无效选择，请输入 1、2 或 3。"
     done
 
-    read -rp "目标 IP 地址 [${old_dip}]: " dip
-    dip="${dip:-$old_dip}"
-    if ! validate_ip "$dip"; then
-        err "IP 地址格式无效。"
-        return
+    if [[ "$family" == "$old_family" ]]; then
+        read -rp "目标 $(family_display "$family") 地址 [${old_dip}]: " dip
+        dip="${dip:-$old_dip}"
+    else
+        read -rp "请输入目标 $(family_display "$family") 地址: " dip
     fi
+    if [[ "$family" == "ipv6" ]]; then validate_ipv6 "$dip"; else validate_ipv4 "$dip"; fi || { err "IP 地址格式无效。"; return; }
 
     read -rp "目标端口 [${old_dport}]: " dport
     dport="${dport:-$old_dport}"
-    if ! validate_port "$dport"; then
-        err "端口无效，请输入 1-65535 之间的数字。"
-        return
-    fi
+    validate_port "$dport" || { err "端口无效。"; return; }
 
     read -rp "备注 [${old_note:--}；留空保留，输入 - 清空]: " note_input
-    if [[ "$note_input" == "-" ]]; then
-        note=""
-    elif [[ -z "$note_input" ]]; then
-        note="$old_note"
-    else
-        [[ "$note_input" == *"|"* ]] && warn "备注中的 | 已替换为空格。"
-        note=$(sanitize_note "$note_input")
-    fi
+    if [[ "$note_input" == "-" ]]; then note=""; elif [[ -z "$note_input" ]]; then note="$old_note"; else note=$(sanitize_note "$note_input"); fi
 
     echo ""
-    echo "即将修改为:"
-    echo "  本机端口 ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
+    echo "即将修改为 $(family_display "$family") 转发:"
+    [[ "$family" == "ipv6" ]] && echo "  本机端口 ${lport} ($(proto_display "$proto")) → [${dip}]:${dport}" || echo "  本机端口 ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
     [[ -n "$note" ]] && echo "  备注: ${note}"
-    local confirm
     read -rp "确认修改？[Y/n]: " confirm
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
-        info "已取消。"
-        return
-    fi
+    [[ "$confirm" =~ ^[Nn]$ ]] && { info "已取消。"; return; }
 
     local network_changed=false
-    if [[ "$old_lport" != "$lport" || "$old_dip" != "$dip" || "$old_dport" != "$dport" || "$old_proto" != "$proto" ]]; then
-        network_changed=true
-    fi
-
+    [[ "$old_lport" != "$lport" || "$old_dip" != "$dip" || "$old_dport" != "$dport" || "$old_proto" != "$proto" ]] && network_changed=true
     backup_conf
     RULES[$idx]="${lport}|${dip}|${dport}|${proto}|${note}"
-    if ! write_conf_file; then
-        return
-    fi
-
-    if ! $network_changed; then
-        info "备注已更新。"
-        log_action "修改备注: ${lport} -> ${dip}:${dport} 备注:${note:-无}"
-        return
-    fi
-
+    write_conf_file || return
+    if ! $network_changed; then info "备注已更新。"; return; fi
     if reload_rules; then
-        # 先移除旧的放行，再按新规则重新放行，避免协议变更时残留旧规则。
         firewall_close_port "$old_lport" "$old_dip" "$old_dport" "$old_proto"
         firewall_open_port "$lport" "$dip" "$dport" "$proto"
-        info "转发规则修改成功: ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
-        log_action "修改转发: ${old_lport} -> ${lport} ($(proto_display "$proto")) ${dip}:${dport} 备注:${note:-无}"
+        info "转发规则修改成功。"
     else
         err "规则加载失败，请检查配置。"
     fi
@@ -1540,7 +1428,7 @@ main_menu() {
     while true; do
         echo ""
         echo "========================================"
-        echo "   nftables 端口转发管理工具 v1.5"
+        echo "   nftables 端口转发管理工具 v1.6"
         echo "========================================"
         echo "  1) 安装 nftables"
         echo "  2) 查看现有端口转发"
