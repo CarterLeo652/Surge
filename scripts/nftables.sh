@@ -111,6 +111,8 @@ has_usable_ipv6() {
     [[ -n "$(get_local_ipv6)" ]]
 }
 
+SELECTED_FAMILY=""
+
 choose_ip_family() {
     local default="${1:-}" choice
     while true; do
@@ -124,10 +126,11 @@ choose_ip_family() {
         read -rp "请选择 [1-2${default:+，默认 ${default}}]: " choice
         choice="${choice:-$default}"
         case "$choice" in
-            1|ipv4|IPv4) echo "ipv4"; return ;;
+            1|ipv4|IPv4) SELECTED_FAMILY="ipv4"; return ;;
             2|ipv6|IPv6)
                 if has_usable_ipv6; then
-                    echo "ipv6"; return
+                    SELECTED_FAMILY="ipv6"
+                    return
                 fi
                 err "本机未检测到可用 IPv6，无法创建 IPv6 转发规则。"
                 ;;
@@ -696,6 +699,25 @@ enable_ip_forward() {
     sysctl -p "${SYSCTL_CONF}" >/dev/null 2>&1 || true
 }
 
+enable_ip6_forward() {
+    local current
+    current=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null) || current="0"
+    if [[ "$current" != "1" ]]; then
+        sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || {
+            err "无法开启 IPv6 转发，请检查内核是否支持 IPv6。"
+            return 1
+        }
+        info "已开启 IPv6 转发。"
+    fi
+    mkdir -p "$(dirname "${SYSCTL_CONF}")" 2>/dev/null || true
+    touch "${SYSCTL_CONF}" 2>/dev/null || true
+    if grep -qE '^[[:space:]]*net\.ipv6\.conf\.all\.forwarding[[:space:]]*=' "${SYSCTL_CONF}" 2>/dev/null; then
+        sed -i -E 's|^[[:space:]]*net\.ipv6\.conf\.all\.forwarding[[:space:]]*=.*|net.ipv6.conf.all.forwarding=1|' "${SYSCTL_CONF}" 2>/dev/null || true
+    else
+        echo "net.ipv6.conf.all.forwarding=1" >> "${SYSCTL_CONF}" 2>/dev/null || true
+    fi
+}
+
 enable_bbr_fq() {
     # 1) 内核是否支持 bbr
     modprobe tcp_bbr 2>/dev/null || true
@@ -1174,8 +1196,9 @@ do_add() {
     load_rules
 
     local family lport proto proto_choice dip dport note rule rp existing_dip
-    family=$(choose_ip_family)
-    [[ "$family" == "ipv6" ]] && enable_ip6_forward || enable_ip_forward
+    choose_ip_family
+    family="$SELECTED_FAMILY"
+    if [[ "$family" == "ipv6" ]]; then enable_ip6_forward || return; else enable_ip_forward; fi
 
     while true; do
         read -rp "请输入本机监听端口 (1-65535): " lport
@@ -1251,8 +1274,9 @@ do_edit() {
     old_proto="${old_proto:-both}"; old_family=$(ip_family "$old_dip")
 
     echo "留空保留当前值。"
-    family=$(choose_ip_family "$([[ "$old_family" == "ipv6" ]] && echo 2 || echo 1)")
-    [[ "$family" == "ipv6" ]] && enable_ip6_forward || enable_ip_forward
+    choose_ip_family "$([[ "$old_family" == "ipv6" ]] && echo 2 || echo 1)"
+    family="$SELECTED_FAMILY"
+    if [[ "$family" == "ipv6" ]]; then enable_ip6_forward || return; else enable_ip_forward; fi
 
     read -rp "本机监听端口 [${old_lport}]: " lport
     lport="${lport:-$old_lport}"
