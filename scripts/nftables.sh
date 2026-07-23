@@ -639,9 +639,9 @@ EOF
 initialization_menu() {
     while true; do
         draw_header
-        echo "初始化与危险操作\n"
+        echo "安装与配置\n"
         echo "  1) 安装依赖并安全初始化"
-        echo "  2) 危险：清空并接管全部 nftables"
+        echo "  2) 清空并接管 nftables 规则"
         echo "  0) 返回"
         read -rp "请选择: " choice
         case "$choice" in
@@ -664,7 +664,7 @@ main_menu() {
         echo "  [5] 全局回源模式    [6] 服务与开机自启"
         echo "\n  维护工具"
         echo "  [7] 诊断与测试      [8] 备份与恢复"
-        echo "  [9] 初始化/危险操作"
+        echo "  [9] 安装与配置"
         echo "\n  [0] 退出"
         read -rp "请选择操作: " choice
         case "$choice" in
