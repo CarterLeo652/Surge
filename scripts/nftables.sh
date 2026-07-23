@@ -1376,14 +1376,14 @@ do_install() {
 # 功能 2：查看现有端口转发
 # ====================================================
 print_rules() {
-    printf "\n\033[1m%-6s %-8s %-10s %-10s    %-28s %s\033[0m\n" "序号" "IP类型" "协议" "本机端口" "目标地址" "备注"
-    echo "────────────────────────────────────────────────────────────────────────────────"
+    printf "\n\033[1m%-6s %-8s %-10s %-34s %s\033[0m\n" "序号" "IP类型" "协议" "本机端口 → 目标地址" "备注"
+    echo "────────────────────────────────────────────────────────────────────────────"
     local idx=1 rule lport dip dport proto note
     for rule in "${RULES[@]}"; do
         IFS='|' read -r lport dip dport proto note <<< "$rule"
         local target="${dip}:${dport}"
         [[ "$(ip_family "$dip")" == "ipv6" ]] && target="[${dip}]:${dport}"
-        printf "%-6s %-8s %-10s %-10s -> %-28s %s\n" "$idx" "$(family_display "$(ip_family "$dip")")" "$(proto_display "${proto:-both}")" "$lport" "$target" "${note:--}"
+        printf "%-6s %-8s %-10s %-34s %s\n" "$idx" "$(family_display "$(ip_family "$dip")")" "$(proto_display "${proto:-both}")" "${lport} → ${target}" "${note:--}"
         ((idx++))
     done
     echo ""
