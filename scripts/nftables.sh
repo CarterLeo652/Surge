@@ -25,6 +25,19 @@ info()    { printf '\033[32m[信息]\033[0m %s\n' "$1"; }
 warn()    { printf '\033[33m[警告]\033[0m %s\n' "$1"; }
 err()     { printf '\033[31m[错误]\033[0m %s\n' "$1"; }
 
+clear_screen() {
+    if command -v clear &>/dev/null; then
+        clear 2>/dev/null || printf '\033[2J\033[H'
+    else
+        printf '\033[2J\033[H'
+    fi
+}
+
+pause_screen() {
+    echo ""
+    read -rp "按 Enter 返回..." _
+}
+
 # ============== root 权限检查 ==============
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -653,7 +666,7 @@ restore_backup() {
 
 do_backup_restore() {
     while true; do
-        echo ""
+        clear_screen
         echo "========================================"
         echo "             备份与恢复"
         echo "========================================"
@@ -665,11 +678,11 @@ do_backup_restore() {
         read -rp "请选择操作 [0-3]: " choice
 
         case "$choice" in
-            1) list_backups ;;
-            2) create_manual_backup ;;
-            3) restore_backup ;;
+            1) list_backups; pause_screen ;;
+            2) create_manual_backup; pause_screen ;;
+            3) restore_backup; pause_screen ;;
             0) return ;;
-            *) err "无效选择，请输入 0-3。" ;;
+            *) err "无效选择，请输入 0-3。"; pause_screen ;;
         esac
     done
 }
@@ -859,7 +872,7 @@ EOF
 
 do_service_management() {
     while true; do
-        echo ""
+        clear_screen
         echo "========================================"
         echo "         服务与持久化管理"
         echo "========================================"
@@ -872,7 +885,7 @@ do_service_management() {
         read -rp "请选择操作 [1-5]: " choice
 
         case "$choice" in
-            1) show_service_persistence_status ;;
+            1) show_service_persistence_status; pause_screen ;;
             2)
                 if ! command -v systemctl &>/dev/null; then
                     err "未检测到 systemctl，请手动启动 nftables 服务。"
@@ -882,6 +895,7 @@ do_service_management() {
                 else
                     err "nftables 服务启用失败，请检查 systemctl status nftables。"
                 fi
+                pause_screen
                 ;;
             3)
                 if [[ ! -f "${CONF_FILE}" ]]; then
@@ -892,10 +906,11 @@ do_service_management() {
                     info "本脚本转发规则已重载。"
                     log_action "重载端口转发规则"
                 fi
+                pause_screen
                 ;;
-            4) repair_main_conf_include ;;
+            4) repair_main_conf_include; pause_screen ;;
             5) return ;;
-            *) err "无效选择，请输入 1-5。" ;;
+            *) err "无效选择，请输入 1-5。"; pause_screen ;;
         esac
     done
 }
@@ -1458,7 +1473,7 @@ do_clear_all() {
 # ====================================================
 main_menu() {
     while true; do
-        echo ""
+        clear_screen
         echo "========================================"
         echo "   nftables 端口转发管理工具 v1.6"
         echo "========================================"
@@ -1476,22 +1491,17 @@ main_menu() {
         read -rp "请选择操作 [0-9]: " choice
 
         case "$choice" in
-            1) do_install ;;
-            2) do_list ;;
-            3) do_add ;;
-            4) do_edit ;;
-            5) do_delete ;;
-            6) do_clear_all ;;
-            7) do_diagnose ;;
+            1) do_install; pause_screen ;;
+            2) do_list; pause_screen ;;
+            3) do_add; pause_screen ;;
+            4) do_edit; pause_screen ;;
+            5) do_delete; pause_screen ;;
+            6) do_clear_all; pause_screen ;;
+            7) do_diagnose; pause_screen ;;
             8) do_service_management ;;
             9) do_backup_restore ;;
-            0)
-                info "再见！"
-                exit 0
-                ;;
-            *)
-                err "无效选择，请输入 0-9。"
-                ;;
+            0) info "再见！"; exit 0 ;;
+            *) err "无效选择，请输入 0-9。"; pause_screen ;;
         esac
     done
 }
