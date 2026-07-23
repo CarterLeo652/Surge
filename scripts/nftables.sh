@@ -552,13 +552,116 @@ reload_rules() {
     return 0
 }
 
-# ============== 备份配置 ==============
+# ============== 备份与恢复 ==============
+LAST_BACKUP=""
+
 backup_conf() {
-    if [[ -f "${CONF_FILE}" ]]; then
-        local ts
-        ts=$(date '+%Y%m%d_%H%M%S')
-        cp "${CONF_FILE}" "${BACKUP_DIR}/port-forward.conf.${ts}" 2>/dev/null || true
+    LAST_BACKUP=""
+    [[ -f "${CONF_FILE}" ]] || return 1
+
+    mkdir -p "${BACKUP_DIR}" 2>/dev/null || return 1
+    local ts backup_file
+    ts=$(date '+%Y%m%d_%H%M%S')
+    backup_file="${BACKUP_DIR}/port-forward.conf.${ts}"
+    while [[ -e "${backup_file}" ]]; do
+        backup_file="${BACKUP_DIR}/port-forward.conf.${ts}.${RANDOM}"
+    done
+
+    cp "${CONF_FILE}" "${backup_file}" 2>/dev/null || return 1
+    LAST_BACKUP="${backup_file}"
+    return 0
+}
+
+load_backup_files() {
+    BACKUP_FILES=()
+    local file
+    mkdir -p "${BACKUP_DIR}" 2>/dev/null || return 1
+    for file in "${BACKUP_DIR}"/port-forward.conf.*; do
+        [[ -f "${file}" ]] && BACKUP_FILES+=("${file}")
+    done
+}
+
+list_backups() {
+    load_backup_files || { err "无法读取备份目录。"; return 1; }
+    if [[ ${#BACKUP_FILES[@]} -eq 0 ]]; then
+        info "暂无备份。"
+        return 1
     fi
+
+    printf "\n%-4s %s\n" "序号" "备份文件"
+    echo "────────────────────────────────────────"
+    local i
+    for ((i=0; i<${#BACKUP_FILES[@]}; i++)); do
+        printf "%-4s %s\n" "$((i + 1))" "$(basename "${BACKUP_FILES[$i]}")"
+    done
+}
+
+create_manual_backup() {
+    if backup_conf; then
+        info "已创建备份: $(basename "${LAST_BACKUP}")"
+        log_action "手动备份配置: $(basename "${LAST_BACKUP}")"
+    else
+        err "创建备份失败：当前转发配置不存在。"
+    fi
+}
+
+restore_backup() {
+    list_backups || return
+
+    local choice selected rollback_backup rule lport dip dport proto note
+    read -rp "请输入要恢复的序号 (0 取消): " choice
+    [[ "$choice" == "0" || -z "$choice" ]] && return
+    if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#BACKUP_FILES[@]} )); then
+        err "无效的序号。"
+        return
+    fi
+    selected="${BACKUP_FILES[$((choice - 1))]}"
+
+    warn "将恢复: $(basename "${selected}")"
+    read -rp "输入 RESTORE 确认恢复: " confirm
+    [[ "$confirm" == "RESTORE" ]] || { info "已取消。"; return; }
+
+    backup_conf || { err "无法备份当前配置，已取消恢复。"; return; }
+    rollback_backup="${LAST_BACKUP}"
+    cp "${selected}" "${CONF_FILE}" 2>/dev/null || { err "写入备份失败。"; return; }
+
+    load_rules
+    if reload_rules; then
+        for rule in "${RULES[@]}"; do
+            IFS='|' read -r lport dip dport proto note <<< "${rule}"
+            firewall_open_port "${lport}" "${dip}" "${dport}" "${proto:-both}"
+        done
+        info "已恢复备份: $(basename "${selected}")"
+        log_action "恢复备份: $(basename "${selected}")"
+    else
+        err "恢复加载失败，正在回滚到恢复前的配置。"
+        cp "${rollback_backup}" "${CONF_FILE}" 2>/dev/null || true
+        load_rules
+        reload_rules || err "自动回滚加载失败，请手动检查 ${rollback_backup}。"
+    fi
+}
+
+do_backup_restore() {
+    while true; do
+        echo ""
+        echo "========================================"
+        echo "             备份与恢复"
+        echo "========================================"
+        echo "  1) 查看备份"
+        echo "  2) 立即创建备份"
+        echo "  3) 恢复备份"
+        echo "  0) 返回主菜单"
+        echo "========================================"
+        read -rp "请选择操作 [0-3]: " choice
+
+        case "$choice" in
+            1) list_backups ;;
+            2) create_manual_backup ;;
+            3) restore_backup ;;
+            0) return ;;
+            *) err "无效选择，请输入 0-3。" ;;
+        esac
+    done
 }
 
 # ============== 开启内核参数：IP 转发 + BBR/fq ==============
@@ -1446,9 +1549,10 @@ main_menu() {
         echo "  6) 清空本脚本管理的全部转发"
         echo "  7) 诊断/自检"
         echo "  8) 服务与持久化管理"
-        echo "  9) 退出"
+        echo "  9) 备份与恢复"
+        echo "  0) 退出"
         echo "========================================"
-        read -rp "请选择操作 [1-9]: " choice
+        read -rp "请选择操作 [0-9]: " choice
 
         case "$choice" in
             1) do_install ;;
@@ -1459,12 +1563,13 @@ main_menu() {
             6) do_clear_all ;;
             7) do_diagnose ;;
             8) do_service_management ;;
-            9)
+            9) do_backup_restore ;;
+            0)
                 info "再见！"
                 exit 0
                 ;;
             *)
-                err "无效选择，请输入 1-9。"
+                err "无效选择，请输入 0-9。"
                 ;;
         esac
     done
