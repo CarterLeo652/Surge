@@ -917,6 +917,14 @@ do_diagnose() {
         echo "  → 修复: sysctl -w net.ipv4.ip_forward=1"
     fi
 
+    if has_usable_ipv6; then
+        local ip6_fwd
+        ip6_fwd=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null) || ip6_fwd="未知"
+        [[ "$ip6_fwd" == "1" ]] && info "IPv6 转发: 已开启" || warn "IPv6 转发: 未开启（创建 IPv6 规则时会自动开启）"
+    else
+        info "IPv6: 本机未检测到可用 IPv6"
+    fi
+
     # 2. nftables 状态
     if command -v nft &>/dev/null; then
         info "nftables: 已安装 ($(nft --version 2>/dev/null || echo '未知版本'))"
@@ -944,7 +952,7 @@ do_diagnose() {
     fi
 
     # 3. 转发规则是否加载
-    if nft list table ip "${TABLE_NAME}" &>/dev/null; then
+    if nft list table ip "${TABLE_NAME}" &>/dev/null || nft list table ip6 "${TABLE_NAME}" &>/dev/null; then
         load_rules
         info "转发规则表: 已加载（${#RULES[@]} 条转发规则）"
     else
