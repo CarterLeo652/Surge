@@ -115,6 +115,49 @@ has_usable_ipv6() {
     [[ -n "$(get_local_ipv6)" ]]
 }
 
+# 固定 SNAT 只能使用本机实际绑定的地址；IPv4 保留私网地址，适配上层设备回源到内网的场景。
+list_local_snat_ips() {
+    local family="$1"
+    if [[ "$family" == "ipv6" ]]; then
+        ip -o -6 addr show scope global 2>/dev/null | awk '{split($4, a, "/"); if (!seen[$2 FS a[1]]++) print $2 "|" a[1]}'
+    else
+        ip -o -4 addr show scope global 2>/dev/null | awk '{split($4, a, "/"); if (!seen[$2 FS a[1]]++) print $2 "|" a[1]}'
+    fi
+}
+
+SELECTED_SNAT_IP=""
+
+choose_local_snat_ip() {
+    local family="$1" choice iface ip
+    local -a local_ips=()
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] && local_ips+=("$ip")
+    done < <(list_local_snat_ips "$family")
+
+    if [[ ${#local_ips[@]} -eq 0 ]]; then
+        err "未检测到可用于固定回源的本机 $(family_display "$family") 地址。"
+        return 1
+    fi
+
+    echo "请选择本机 $(family_display "$family") 回源 IP："
+    local i
+    for ((i=0; i<${#local_ips[@]}; i++)); do
+        IFS='|' read -r iface ip <<< "${local_ips[$i]}"
+        printf '  %s) %s (%s)\n' "$((i + 1))" "$ip" "$iface"
+    done
+    echo "  0) 返回"
+
+    while true; do
+        read -rp "请选择 [0-${#local_ips[@]}]: " choice
+        [[ "$choice" == "0" || -z "$choice" ]] && return 1
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#local_ips[@]} )); then
+            IFS='|' read -r _ SELECTED_SNAT_IP <<< "${local_ips[$((choice - 1))]}"
+            return 0
+        fi
+        err "无效选择。"
+    done
+}
+
 SELECTED_FAMILY=""
 
 choose_ip_family() {
@@ -926,8 +969,8 @@ configure_snat_family() {
                 pause_screen
                 ;;
             2)
-                read -rp "请输入固定 $(family_display "$family") 回源 IP: " ip
-                if [[ "$family" == "ipv6" ]]; then validate_ipv6 "$ip"; else validate_ipv4 "$ip"; fi || { err "IP 地址格式无效。"; pause_screen; continue; }
+                choose_local_snat_ip "$family" || { pause_screen; continue; }
+                ip="$SELECTED_SNAT_IP"
                 read -rp "确认固定回源为 $ip？[y/N]: " confirm
                 [[ "$confirm" =~ ^[Yy]$ ]] || continue
                 if [[ "$family" == "ipv6" ]]; then SNAT6_MODE="fixed"; SNAT6_IP="$ip"; else SNAT4_MODE="fixed"; SNAT4_IP="$ip"; fi
