@@ -579,6 +579,7 @@ load_backup_files() {
     for file in "${BACKUP_DIR}"/port-forward.conf.*; do
         [[ -f "${file}" ]] && BACKUP_FILES+=("${file}")
     done
+    return 0
 }
 
 list_backups() {
