@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# nftables 端口转发管理工具 v1.3
+# nftables 端口转发管理工具 v1.4
 # 交互式管理 DNAT 端口转发规则（支持 TCP / UDP / TCP+UDP 选择）
 #
 
@@ -128,9 +128,9 @@ try_persist_iptables() {
 #       $4=要排除的协议(可选，用于协议级共享判定)
 dest_still_used() {
     local check_ip="$1" check_dport="$2" exclude_lport="$3" exclude_proto="${4:-}"
-    local rule lport dip dport proto
+    local rule lport dip dport proto note
     for rule in "${RULES[@]}"; do
-        IFS='|' read -r lport dip dport proto <<< "$rule"
+        IFS='|' read -r lport dip dport proto note <<< "$rule"
         proto="${proto:-both}"
         # 跳过正在删除的那条
         [[ "$lport" == "$exclude_lport" ]] && continue
@@ -404,8 +404,16 @@ NFTCONF
 }
 
 # ============== 写出配置文件（基于当前 RULES 数组） ==============
-# RULES 数组格式: "本机端口|目标IP|目标端口|协议(tcp|udp|both)"
+# RULES 数组格式: "本机端口|目标IP|目标端口|协议(tcp|udp|both)|备注"
 declare -a RULES=()
+
+sanitize_note() {
+    local note="${1:-}"
+    note="${note//$'\r'/ }"
+    note="${note//$'\n'/ }"
+    note="${note//|/ }"
+    printf "%s" "$note"
+}
 
 load_rules() {
     RULES=()
@@ -413,12 +421,14 @@ load_rules() {
         return
     fi
 
-    # 用普通变量记录已见过的端口及其协议/目标，兼容老版 bash（无关联数组）
-    # SEEN 形如 "8080|10.0.0.1|80|tcponly" 或 "9090|10.0.0.2|9090|udponly" 或合并后 "both"
-    local SEEN=""
-    local line p lport dip dport
+    local line p lport dip dport pending_note=""
 
     while IFS= read -r line; do
+        # 兼容 v1.2 以及本版本写入的备注
+        if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*备注:[[:space:]]*(.*)$ ]]; then
+            pending_note=$(sanitize_note "${BASH_REMATCH[1]}")
+            continue
+        fi
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         if [[ "$line" =~ (tcp|udp)\ dport\ ([0-9]+)\ dnat\ to\ ([0-9.]+):([0-9]+) ]]; then
             p="${BASH_REMATCH[1]}"
@@ -426,64 +436,32 @@ load_rules() {
             dip="${BASH_REMATCH[3]}"
             dport="${BASH_REMATCH[4]}"
 
-            # 查找该端口是否已记录
-            local existing=""
-            local rest=""
-            local entry
-            local new_seen=""
-            for entry in $SEEN; do
-                local e_lport e_dip e_dport e_proto
-                IFS='|' read -r e_lport e_dip e_dport e_proto <<< "$entry"
-                if [[ "$e_lport" == "$lport" ]]; then
-                    existing="$entry"
-                else
-                    new_seen+=" $entry"
+            # 同一监听端口的 tcp/udp 行合并成一条规则；备注保存在数组中，支持空格
+            local idx=-1 i old_lport old_dip old_dport old_proto old_note
+            for ((i = 0; i < ${#RULES[@]}; i++)); do
+                IFS='|' read -r old_lport old_dip old_dport old_proto old_note <<< "${RULES[$i]}"
+                if [[ "$old_lport" == "$lport" ]]; then
+                    idx=$i
+                    break
                 fi
             done
 
-            if [[ -z "$existing" ]]; then
-                # 首次见到该端口
-                if [[ "$p" == "tcp" ]]; then
-                    SEEN+=" ${lport}|${dip}|${dport}|tcponly"
-                else
-                    SEEN+=" ${lport}|${dip}|${dport}|udponly"
-                fi
+            if (( idx < 0 )); then
+                RULES+=("${lport}|${dip}|${dport}|${p}|${pending_note}")
             else
-                # 已存在，合并协议
-                local e_lport e_dip e_dport e_proto
-                IFS='|' read -r e_lport e_dip e_dport e_proto <<< "$existing"
-                local merged="$e_proto"
-                if [[ "$p" == "tcp" && "$merged" != *tcp* ]]; then
-                    merged="${merged}+tcp"
-                elif [[ "$p" == "udp" && "$merged" != *udp* ]]; then
-                    merged="${merged}+udp"
+                old_proto="${old_proto:-both}"
+                local merged_proto="$old_proto"
+                if [[ "$old_proto" != "both" && "$old_proto" != "$p" ]]; then
+                    merged_proto="both"
                 fi
-                # 规范化为 both
-                if [[ "$merged" == *tcp* && "$merged" == *udp* ]]; then
-                    merged="both"
-                elif [[ "$merged" == *tcp* ]]; then
-                    merged="tcponly"
-                else
-                    merged="udponly"
+                if [[ -z "$old_note" ]]; then
+                    old_note="$pending_note"
                 fi
-                SEEN="${new_seen} ${e_lport}|${e_dip}|${e_dport}|${merged}"
+                RULES[$idx]="${old_lport}|${old_dip}|${old_dport}|${merged_proto}|${old_note}"
             fi
+            pending_note=""
         fi
     done < "${CONF_FILE}"
-
-    # 转换为标准 proto 字段写入 RULES
-    local entry
-    for entry in $SEEN; do
-        [[ -z "$entry" ]] && continue
-        local e_lport e_dip e_dport e_proto
-        IFS='|' read -r e_lport e_dip e_dport e_proto <<< "$entry"
-        case "$e_proto" in
-            both)    e_proto="both" ;;
-            tcponly) e_proto="tcp"  ;;
-            *)       e_proto="udp"  ;;
-        esac
-        RULES+=("${e_lport}|${e_dip}|${e_dport}|${e_proto}")
-    done
 }
 
 write_conf_file() {
@@ -510,13 +488,14 @@ table ip ${TABLE_NAME} {
         type nat hook prerouting priority -100; policy accept;
 EOF
 
-    local rule lport dip dport proto
+    local rule lport dip dport proto note
     for rule in "${RULES[@]}"; do
-        IFS='|' read -r lport dip dport proto <<< "$rule"
+        IFS='|' read -r lport dip dport proto note <<< "$rule"
         proto="${proto:-both}"
         {
             echo ""
             echo "        # 转发: 本机:${lport} ($(proto_display "$proto")) -> ${dip}:${dport}"
+            [[ -n "$note" ]] && echo "        # 备注: ${note}"
             if proto_has_tcp "$proto"; then
                 echo "        tcp dport ${lport} dnat to ${dip}:${dport}"
             fi
@@ -535,7 +514,7 @@ EOF
 EOF
 
     for rule in "${RULES[@]}"; do
-        IFS='|' read -r lport dip dport proto <<< "$rule"
+        IFS='|' read -r lport dip dport proto note <<< "$rule"
         proto="${proto:-both}"
         {
             echo ""
@@ -798,9 +777,9 @@ do_diagnose() {
     if [[ ${#RULES[@]} -gt 0 ]]; then
         read -rp "是否测试目标连通性？[y/N]: " test_conn
         if [[ "$test_conn" =~ ^[Yy]$ ]]; then
-            local rule lport dip dport proto
+            local rule lport dip dport proto note
             for rule in "${RULES[@]}"; do
-                IFS='|' read -r lport dip dport proto <<< "$rule"
+                IFS='|' read -r lport dip dport proto note <<< "$rule"
                 proto="${proto:-both}"
 
                 # TCP 测试：建立连接即视为通
@@ -939,6 +918,22 @@ do_install() {
 # ====================================================
 # 功能 2：查看现有端口转发
 # ====================================================
+print_rules() {
+    printf "\n\033[1m%-6s %-10s %-10s    %-22s %s\033[0m\n" "序号" "协议" "本机端口" "目标地址" "备注"
+    echo "────────────────────────────────────────────────────────────────────────"
+
+    local idx=1
+    local rule lport dip dport proto note shown_note
+    for rule in "${RULES[@]}"; do
+        IFS='|' read -r lport dip dport proto note <<< "$rule"
+        shown_note="${note:--}"
+        printf "%-6s %-10s %-10s -> %-22s %s\n" \
+            "$idx" "$(proto_display "${proto:-both}")" "$lport" "${dip}:${dport}" "$shown_note"
+        ((idx++))
+    done
+    echo ""
+}
+
 do_list() {
     echo ""
     load_rules
@@ -948,18 +943,7 @@ do_list() {
         return
     fi
 
-    printf "\n\033[1m%-6s %-10s %-10s    %-22s\033[0m\n" "序号" "协议" "本机端口" "目标地址"
-    echo "──────────────────────────────────────────────────────"
-
-    local idx=1
-    local rule lport dip dport proto
-    for rule in "${RULES[@]}"; do
-        IFS='|' read -r lport dip dport proto <<< "$rule"
-        printf "%-6s %-10s %-10s -> %-22s\n" \
-            "$idx" "$(proto_display "${proto:-both}")" "$lport" "${dip}:${dport}"
-        ((idx++))
-    done
-    echo ""
+    print_rules
 }
 
 # ====================================================
@@ -1046,10 +1030,19 @@ do_add() {
         err "端口无效，请输入 1-65535 之间的数字。"
     done
 
+    # 输入备注
+    local note
+    read -rp "请输入备注（可留空）: " note
+    if [[ "$note" == *"|"* ]]; then
+        warn "备注中的 | 已替换为空格。"
+    fi
+    note=$(sanitize_note "$note")
+
     # 确认
     echo ""
     echo "即将添加转发规则:"
     echo "  本机端口 ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
+    [[ -n "$note" ]] && echo "  备注: ${note}"
     read -rp "确认添加？[Y/n]: " confirm
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         info "已取消。"
@@ -1058,7 +1051,7 @@ do_add() {
 
     # 备份并写入
     backup_conf
-    RULES+=("${lport}|${dip}|${dport}|${proto}")
+    RULES+=("${lport}|${dip}|${dport}|${proto}|${note}")
     if ! write_conf_file; then
         return
     fi
@@ -1066,7 +1059,7 @@ do_add() {
     if reload_rules; then
         firewall_open_port "$lport" "$dip" "$dport" "$proto"
         info "转发规则添加成功: ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
-        log_action "新增转发: ${lport} ($(proto_display "$proto")) -> ${dip}:${dport}"
+        log_action "新增转发: ${lport} ($(proto_display "$proto")) -> ${dip}:${dport} 备注:${note:-无}"
         info "若转发不通，请使用菜单中的【诊断/自检】排查。"
     else
         err "规则加载失败，请检查配置。"
@@ -1074,7 +1067,142 @@ do_add() {
 }
 
 # ====================================================
-# 功能 4：删除端口转发
+# 功能 4：修改端口转发
+# ====================================================
+do_edit() {
+    echo ""
+    if ! command -v nft &>/dev/null; then
+        err "nftables 未安装，请先选择 [1] 安装。"
+        return
+    fi
+
+    load_rules
+    if [[ ${#RULES[@]} -eq 0 ]]; then
+        info "当前没有端口转发规则，无需修改。"
+        return
+    fi
+
+    print_rules
+    local choice
+    read -rp "请输入要修改的序号 (0 取消): " choice
+    if [[ "$choice" == "0" ]] || [[ -z "$choice" ]]; then
+        info "已取消。"
+        return
+    fi
+    if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#RULES[@]} )); then
+        err "无效的序号。"
+        return
+    fi
+
+    local idx=$((choice - 1)) target
+    target="${RULES[$idx]}"
+    local old_lport old_dip old_dport old_proto old_note
+    IFS='|' read -r old_lport old_dip old_dport old_proto old_note <<< "$target"
+    old_proto="${old_proto:-both}"
+
+    echo "留空保留当前值。"
+    local lport dip dport proto proto_choice note_input note
+    read -rp "本机监听端口 [${old_lport}]: " lport
+    lport="${lport:-$old_lport}"
+    if ! validate_port "$lport"; then
+        err "端口无效，请输入 1-65535 之间的数字。"
+        return
+    fi
+
+    if [[ "$lport" != "$old_lport" ]]; then
+        local i rp
+        for ((i = 0; i < ${#RULES[@]}; i++)); do
+            (( i == idx )) && continue
+            IFS='|' read -r rp _ _ _ _ <<< "${RULES[$i]}"
+            if [[ "$rp" == "$lport" ]]; then
+                err "本机端口 ${lport} 已存在转发规则。"
+                return
+            fi
+        done
+        if ! check_port_conflict "$lport"; then
+            info "已取消。"
+            return
+        fi
+    fi
+
+    while true; do
+        read -rp "协议 [1 TCP/2 UDP/3 TCP+UDP，当前 $(proto_display "$old_proto")]: " proto_choice
+        if [[ -z "$proto_choice" ]]; then
+            proto="$old_proto"
+            break
+        fi
+        proto=$(normalize_proto "$proto_choice")
+        if [[ -n "$proto" ]]; then
+            break
+        fi
+        err "无效选择，请输入 1、2 或 3。"
+    done
+
+    read -rp "目标 IP 地址 [${old_dip}]: " dip
+    dip="${dip:-$old_dip}"
+    if ! validate_ip "$dip"; then
+        err "IP 地址格式无效。"
+        return
+    fi
+
+    read -rp "目标端口 [${old_dport}]: " dport
+    dport="${dport:-$old_dport}"
+    if ! validate_port "$dport"; then
+        err "端口无效，请输入 1-65535 之间的数字。"
+        return
+    fi
+
+    read -rp "备注 [${old_note:--}；留空保留，输入 - 清空]: " note_input
+    if [[ "$note_input" == "-" ]]; then
+        note=""
+    elif [[ -z "$note_input" ]]; then
+        note="$old_note"
+    else
+        [[ "$note_input" == *"|"* ]] && warn "备注中的 | 已替换为空格。"
+        note=$(sanitize_note "$note_input")
+    fi
+
+    echo ""
+    echo "即将修改为:"
+    echo "  本机端口 ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
+    [[ -n "$note" ]] && echo "  备注: ${note}"
+    local confirm
+    read -rp "确认修改？[Y/n]: " confirm
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        info "已取消。"
+        return
+    fi
+
+    local network_changed=false
+    if [[ "$old_lport" != "$lport" || "$old_dip" != "$dip" || "$old_dport" != "$dport" || "$old_proto" != "$proto" ]]; then
+        network_changed=true
+    fi
+
+    backup_conf
+    RULES[$idx]="${lport}|${dip}|${dport}|${proto}|${note}"
+    if ! write_conf_file; then
+        return
+    fi
+
+    if ! $network_changed; then
+        info "备注已更新。"
+        log_action "修改备注: ${lport} -> ${dip}:${dport} 备注:${note:-无}"
+        return
+    fi
+
+    if reload_rules; then
+        # 先移除旧的放行，再按新规则重新放行，避免协议变更时残留旧规则。
+        firewall_close_port "$old_lport" "$old_dip" "$old_dport" "$old_proto"
+        firewall_open_port "$lport" "$dip" "$dport" "$proto"
+        info "转发规则修改成功: ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
+        log_action "修改转发: ${old_lport} -> ${lport} ($(proto_display "$proto")) ${dip}:${dport} 备注:${note:-无}"
+    else
+        err "规则加载失败，请检查配置。"
+    fi
+}
+
+# ====================================================
+# 功能 5：删除端口转发
 # ====================================================
 do_delete() {
     echo ""
@@ -1090,19 +1218,7 @@ do_delete() {
         return
     fi
 
-    # 展示列表
-    printf "\n\033[1m%-6s %-10s %-10s    %-20s\033[0m\n" "序号" "协议" "本机端口" "目标地址"
-    echo "────────────────────────────────────────────────────"
-
-    local idx=1
-    local rule lport dip dport proto
-    for rule in "${RULES[@]}"; do
-        IFS='|' read -r lport dip dport proto <<< "$rule"
-        printf "%-6s %-10s %-10s -> %-20s\n" \
-            "$idx" "$(proto_display "${proto:-both}")" "$lport" "${dip}:${dport}"
-        ((idx++))
-    done
-    echo ""
+    print_rules
 
     # 选择删除
     local choice
@@ -1119,11 +1235,13 @@ do_delete() {
     fi
 
     local target="${RULES[$((choice-1))]}"
-    IFS='|' read -r lport dip dport proto <<< "$target"
+    local note
+    IFS='|' read -r lport dip dport proto note <<< "$target"
     proto="${proto:-both}"
 
     echo "即将删除转发规则:"
     echo "  本机端口 ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
+    [[ -n "$note" ]] && echo "  备注: ${note}"
     read -rp "确认删除？[Y/n]: " confirm
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         info "已取消。"
@@ -1150,7 +1268,7 @@ do_delete() {
 }
 
 # ====================================================
-# 功能 5：一键清空所有转发
+# 功能 6：一键清空所有转发
 # ====================================================
 do_clear_all() {
     echo ""
@@ -1176,9 +1294,9 @@ do_clear_all() {
     backup_conf
 
     # 先清理所有防火墙规则（清空场景用 force，无需检查共享）
-    local rule lport dip dport proto
+    local rule lport dip dport proto note
     for rule in "${RULES[@]}"; do
-        IFS='|' read -r lport dip dport proto <<< "$rule"
+        IFS='|' read -r lport dip dport proto note <<< "$rule"
         firewall_close_port "$lport" "$dip" "$dport" "${proto:-both}" "force"
     done
 
@@ -1202,31 +1320,33 @@ main_menu() {
     while true; do
         echo ""
         echo "========================================"
-        echo "   nftables 端口转发管理工具 v1.3"
+        echo "   nftables 端口转发管理工具 v1.4"
         echo "========================================"
         echo "  1) 安装 nftables"
         echo "  2) 查看现有端口转发"
         echo "  3) 新增端口转发"
-        echo "  4) 删除端口转发"
-        echo "  5) 一键清空所有转发"
-        echo "  6) 诊断/自检"
-        echo "  7) 退出"
+        echo "  4) 修改端口转发"
+        echo "  5) 删除端口转发"
+        echo "  6) 清空本脚本管理的全部转发"
+        echo "  7) 诊断/自检"
+        echo "  8) 退出"
         echo "========================================"
-        read -rp "请选择操作 [1-7]: " choice
+        read -rp "请选择操作 [1-8]: " choice
 
         case "$choice" in
             1) do_install ;;
             2) do_list ;;
             3) do_add ;;
-            4) do_delete ;;
-            5) do_clear_all ;;
-            6) do_diagnose ;;
-            7)
+            4) do_edit ;;
+            5) do_delete ;;
+            6) do_clear_all ;;
+            7) do_diagnose ;;
+            8)
                 info "再见！"
                 exit 0
                 ;;
             *)
-                err "无效选择，请输入 1-7。"
+                err "无效选择，请输入 1-8。"
                 ;;
         esac
     done
