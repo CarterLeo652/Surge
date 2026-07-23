@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# nftables 端口转发管理工具 v1.6
+# nftables 端口转发管理工具 v1.7
 # 交互式管理 DNAT 端口转发规则（支持 TCP / UDP / TCP+UDP 选择）
 #
 
@@ -424,9 +424,13 @@ NFTCONF
     fi
 }
 
-# ============== 写出配置文件（IPv4 / IPv6 规则按目标地址自动分表） ==============
+# ============== 转发规则与回源设置 ==============
 # RULES 数组格式: "本机端口|目标IP|目标端口|协议(tcp|udp|both)|备注"
 declare -a RULES=()
+SNAT4_MODE="auto"
+SNAT4_IP=""
+SNAT6_MODE="auto"
+SNAT6_IP=""
 
 sanitize_note() {
     local note="${1:-}"
@@ -436,8 +440,30 @@ sanitize_note() {
     printf "%s" "$note"
 }
 
+snat_mode_display() {
+    local family="$1" mode ip
+    if [[ "$family" == "ipv6" ]]; then mode="$SNAT6_MODE"; ip="$SNAT6_IP"; else mode="$SNAT4_MODE"; ip="$SNAT4_IP"; fi
+    [[ "$mode" == "fixed" ]] && printf '固定 SNAT → %s' "$ip" || printf '自动（MASQUERADE）'
+}
+
+load_snat_settings() {
+    SNAT4_MODE="auto"; SNAT4_IP=""
+    SNAT6_MODE="auto"; SNAT6_IP=""
+    [[ -f "${CONF_FILE}" ]] || return
+    local key value
+    while IFS='=' read -r key value; do
+        case "$key" in
+            '# NFTPF_SNAT4_MODE') [[ "$value" == "fixed" || "$value" == "auto" ]] && SNAT4_MODE="$value" ;;
+            '# NFTPF_SNAT4_IP') validate_ipv4 "$value" && SNAT4_IP="$value" ;;
+            '# NFTPF_SNAT6_MODE') [[ "$value" == "fixed" || "$value" == "auto" ]] && SNAT6_MODE="$value" ;;
+            '# NFTPF_SNAT6_IP') validate_ipv6 "$value" && SNAT6_IP="$value" ;;
+        esac
+    done < "${CONF_FILE}"
+}
+
 load_rules() {
     RULES=()
+    load_snat_settings
     [[ -f "${CONF_FILE}" ]] || return
 
     local line p lport dip dport pending_note="" current_family="ipv4"
@@ -452,11 +478,10 @@ load_rules() {
         if [[ "$line" =~ (tcp|udp)[[:space:]]+dport[[:space:]]+([0-9]+)[[:space:]]+dnat[[:space:]]+to[[:space:]]+\[?([0-9A-Fa-f:.]+)\]?:([0-9]+) ]]; then
             p="${BASH_REMATCH[1]}"; lport="${BASH_REMATCH[2]}"; dip="${BASH_REMATCH[3]}"; dport="${BASH_REMATCH[4]}"
             [[ "$(ip_family "$dip")" == "$current_family" ]] || continue
-
             local idx=-1 i old_lport old_dip old_dport old_proto old_note
             for ((i=0; i<${#RULES[@]}; i++)); do
                 IFS='|' read -r old_lport old_dip old_dport old_proto old_note <<< "${RULES[$i]}"
-                if [[ "$old_lport" == "$lport" && "$(ip_family "$old_dip")" == "$current_family" ]]; then idx=$i; break; fi
+                [[ "$old_lport" == "$lport" && "$(ip_family "$old_dip")" == "$current_family" ]] && { idx=$i; break; }
             done
             if (( idx < 0 )); then
                 RULES+=("${lport}|${dip}|${dport}|${p}|${pending_note}")
@@ -472,30 +497,33 @@ load_rules() {
 }
 
 write_conf_file() {
-    local local_ip="" local_ip6="" has_v4=false has_v6=false rule lport dip dport proto note
+    local has_v4=false has_v6=false rule lport dip dport proto note
     for rule in "${RULES[@]}"; do
         IFS='|' read -r lport dip dport proto note <<< "$rule"
         [[ "$(ip_family "$dip")" == "ipv6" ]] && has_v6=true || has_v4=true
     done
-    if $has_v4; then
-        local_ip=$(get_local_ip)
-        [[ -n "$local_ip" ]] || { err "无法获取本机 IPv4 地址。"; return 1; }
+    if $has_v4 && [[ "$SNAT4_MODE" == "fixed" ]] && ! validate_ipv4 "$SNAT4_IP"; then
+        err "IPv4 固定回源 IP 无效，请在【回源设置】中重新设置。"
+        return 1
     fi
-    if $has_v6; then
-        local_ip6=$(get_local_ipv6)
-        [[ -n "$local_ip6" ]] || { err "本机未检测到可用 IPv6，无法写入 IPv6 转发规则。"; return 1; }
+    if $has_v6 && [[ "$SNAT6_MODE" == "fixed" ]] && ! validate_ipv6 "$SNAT6_IP"; then
+        err "IPv6 固定回源 IP 无效，请在【回源设置】中重新设置。"
+        return 1
     fi
 
     local tmp_file="${CONF_FILE}.tmp.$$"
     cat > "${tmp_file}" <<EOF
 #!/usr/sbin/nft -f
-# 由 nftables 端口转发管理工具 v1.6 自动生成。
+# 由 nftables 端口转发管理工具 v1.7 自动生成。
+# NFTPF_SNAT4_MODE=${SNAT4_MODE}
+# NFTPF_SNAT4_IP=${SNAT4_IP}
+# NFTPF_SNAT6_MODE=${SNAT6_MODE}
+# NFTPF_SNAT6_IP=${SNAT6_IP}
 EOF
 
     if $has_v4; then
+        [[ "$SNAT4_MODE" == "fixed" ]] && echo "define SNAT4_IP = ${SNAT4_IP}" >> "${tmp_file}"
         cat >> "${tmp_file}" <<EOF
-define LOCAL_IP = ${local_ip}
-
 table ip ${TABLE_NAME} {
     chain prerouting {
         type nat hook prerouting priority -100; policy accept;
@@ -520,18 +548,21 @@ EOF
             IFS='|' read -r lport dip dport proto note <<< "$rule"
             [[ "$(ip_family "$dip")" == "ipv4" ]] || continue
             {
-                proto_has_tcp "${proto:-both}" && echo "        ip daddr ${dip} tcp dport ${dport} ct status dnat snat to \$LOCAL_IP"
-                proto_has_udp "${proto:-both}" && echo "        ip daddr ${dip} udp dport ${dport} ct status dnat snat to \$LOCAL_IP"
+                if [[ "$SNAT4_MODE" == "fixed" ]]; then
+                    proto_has_tcp "${proto:-both}" && echo "        ip daddr ${dip} tcp dport ${dport} ct status dnat snat to \$SNAT4_IP"
+                    proto_has_udp "${proto:-both}" && echo "        ip daddr ${dip} udp dport ${dport} ct status dnat snat to \$SNAT4_IP"
+                else
+                    proto_has_tcp "${proto:-both}" && echo "        ip daddr ${dip} tcp dport ${dport} ct status dnat masquerade"
+                    proto_has_udp "${proto:-both}" && echo "        ip daddr ${dip} udp dport ${dport} ct status dnat masquerade"
+                fi
             } >> "${tmp_file}"
         done
-        echo "    }" >> "${tmp_file}"
-        echo "}" >> "${tmp_file}"
+        echo "    }" >> "${tmp_file}"; echo "}" >> "${tmp_file}"
     fi
 
     if $has_v6; then
+        [[ "$SNAT6_MODE" == "fixed" ]] && echo "define SNAT6_IP = ${SNAT6_IP}" >> "${tmp_file}"
         cat >> "${tmp_file}" <<EOF
-define LOCAL_IP6 = ${local_ip6}
-
 table ip6 ${TABLE_NAME} {
     chain prerouting {
         type nat hook prerouting priority -100; policy accept;
@@ -556,12 +587,16 @@ EOF
             IFS='|' read -r lport dip dport proto note <<< "$rule"
             [[ "$(ip_family "$dip")" == "ipv6" ]] || continue
             {
-                proto_has_tcp "${proto:-both}" && echo "        ip6 daddr ${dip} tcp dport ${dport} ct status dnat snat to \$LOCAL_IP6"
-                proto_has_udp "${proto:-both}" && echo "        ip6 daddr ${dip} udp dport ${dport} ct status dnat snat to \$LOCAL_IP6"
+                if [[ "$SNAT6_MODE" == "fixed" ]]; then
+                    proto_has_tcp "${proto:-both}" && echo "        ip6 daddr ${dip} tcp dport ${dport} ct status dnat snat to \$SNAT6_IP"
+                    proto_has_udp "${proto:-both}" && echo "        ip6 daddr ${dip} udp dport ${dport} ct status dnat snat to \$SNAT6_IP"
+                else
+                    proto_has_tcp "${proto:-both}" && echo "        ip6 daddr ${dip} tcp dport ${dport} ct status dnat masquerade"
+                    proto_has_udp "${proto:-both}" && echo "        ip6 daddr ${dip} udp dport ${dport} ct status dnat masquerade"
+                fi
             } >> "${tmp_file}"
         done
-        echo "    }" >> "${tmp_file}"
-        echo "}" >> "${tmp_file}"
+        echo "    }" >> "${tmp_file}"; echo "}" >> "${tmp_file}"
     fi
 
     mv -f "${tmp_file}" "${CONF_FILE}" 2>/dev/null || { err "无法写入配置文件 ${CONF_FILE}"; rm -f "${tmp_file}" 2>/dev/null || true; return 1; }
@@ -797,6 +832,100 @@ check_firewall_status() {
     fi
 }
 
+show_snat_status() {
+    load_snat_settings
+    echo "IPv4：$(snat_mode_display ipv4)"
+    if has_usable_ipv6; then
+        echo "IPv6：$(snat_mode_display ipv6)"
+    else
+        echo "IPv6：本机未检测到 IPv6"
+    fi
+}
+
+apply_snat_settings() {
+    backup_conf || { err "无法备份当前配置，已取消。"; return 1; }
+    local rollback_backup="${LAST_BACKUP}"
+    if write_conf_file && reload_rules; then
+        info "回源设置已保存并生效。"
+        log_action "更新回源设置"
+        return 0
+    fi
+    err "应用失败，正在恢复原配置。"
+    cp "${rollback_backup}" "${CONF_FILE}" 2>/dev/null || true
+    load_rules
+    reload_rules || err "原配置自动恢复失败，请手动检查 ${rollback_backup}。"
+    return 1
+}
+
+configure_snat_family() {
+    local family="$1" mode ip confirm
+    if [[ "$family" == "ipv6" ]] && ! has_usable_ipv6; then
+        err "本机未检测到可用 IPv6，无法设置 IPv6 回源。"
+        pause_screen
+        return
+    fi
+    while true; do
+        clear_screen
+        echo "========================================"
+        echo "          $(family_display "$family") 回源设置"
+        echo "========================================"
+        echo "当前：$(snat_mode_display "$family")"
+        echo ""
+        echo "  1) 自动回源（MASQUERADE）"
+        echo "  2) 固定回源 IP"
+        echo "  0) 返回"
+        echo "========================================"
+        read -rp "请选择操作 [0-2]: " mode
+        case "$mode" in
+            1)
+                read -rp "确认使用自动回源？[y/N]: " confirm
+                [[ "$confirm" =~ ^[Yy]$ ]] || continue
+                if [[ "$family" == "ipv6" ]]; then SNAT6_MODE="auto"; SNAT6_IP=""; else SNAT4_MODE="auto"; SNAT4_IP=""; fi
+                apply_snat_settings
+                pause_screen
+                ;;
+            2)
+                read -rp "请输入固定 $(family_display "$family") 回源 IP: " ip
+                if [[ "$family" == "ipv6" ]]; then validate_ipv6 "$ip"; else validate_ipv4 "$ip"; fi || { err "IP 地址格式无效。"; pause_screen; continue; }
+                read -rp "确认固定回源为 $ip？[y/N]: " confirm
+                [[ "$confirm" =~ ^[Yy]$ ]] || continue
+                if [[ "$family" == "ipv6" ]]; then SNAT6_MODE="fixed"; SNAT6_IP="$ip"; else SNAT4_MODE="fixed"; SNAT4_IP="$ip"; fi
+                apply_snat_settings
+                pause_screen
+                ;;
+            0) return ;;
+            *) err "无效选择，请输入 0-2。"; pause_screen ;;
+        esac
+    done
+}
+
+do_snat_settings() {
+    while true; do
+        load_rules
+        clear_screen
+        echo "========================================"
+        echo "               回源设置"
+        echo "========================================"
+        show_snat_status
+        echo ""
+        echo "  1) 设置 IPv4 回源"
+        if has_usable_ipv6; then
+            echo "  2) 设置 IPv6 回源"
+        else
+            echo "  2) 设置 IPv6 回源（本机未检测到 IPv6）"
+        fi
+        echo "  0) 返回"
+        echo "========================================"
+        read -rp "请选择操作 [0-2]: " choice
+        case "$choice" in
+            1) configure_snat_family ipv4 ;;
+            2) configure_snat_family ipv6 ;;
+            0) return ;;
+            *) err "无效选择，请输入 0-2。"; pause_screen ;;
+        esac
+    done
+}
+
 # ============== 服务与持久化管理 ==============
 show_service_persistence_status() {
     echo ""
@@ -874,15 +1003,16 @@ do_service_management() {
     while true; do
         clear_screen
         echo "========================================"
-        echo "         服务与持久化管理"
+        echo "           服务与回源设置"
         echo "========================================"
         echo "  1) 查看服务与持久化状态"
         echo "  2) 启用并立即启动 nftables"
         echo "  3) 重载本脚本转发规则"
         echo "  4) 修复主配置 include（不清空规则）"
-        echo "  5) 返回主菜单"
+        echo "  5) 回源设置"
+        echo "  0) 返回主菜单"
         echo "========================================"
-        read -rp "请选择操作 [1-5]: " choice
+        read -rp "请选择操作 [0-5]: " choice
 
         case "$choice" in
             1) show_service_persistence_status; pause_screen ;;
@@ -909,8 +1039,9 @@ do_service_management() {
                 pause_screen
                 ;;
             4) repair_main_conf_include; pause_screen ;;
-            5) return ;;
-            *) err "无效选择，请输入 1-5。"; pause_screen ;;
+            5) do_snat_settings ;;
+            0) return ;;
+            *) err "无效选择，请输入 0-5。"; pause_screen ;;
         esac
     done
 }
@@ -1475,7 +1606,7 @@ main_menu() {
     while true; do
         clear_screen
         echo "========================================"
-        echo "   nftables 端口转发管理工具 v1.6"
+        echo "   nftables 端口转发管理工具 v1.7"
         echo "========================================"
         echo "  1) 安装 nftables"
         echo "  2) 查看现有端口转发"
@@ -1484,7 +1615,7 @@ main_menu() {
         echo "  5) 删除端口转发"
         echo "  6) 清空本脚本管理的全部转发"
         echo "  7) 诊断/自检"
-        echo "  8) 服务与持久化管理"
+        echo "  8) 服务与回源设置"
         echo "  9) 备份与恢复"
         echo "  0) 退出"
         echo "========================================"
