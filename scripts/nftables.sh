@@ -1052,14 +1052,14 @@ do_diagnose() {
         info "nftables 开机启动: 是"
     else
         warn "nftables 开机启动: 否（重启后规则可能丢失）"
-        echo "  → 修复: 选择菜单【8 诊断与服务】→【3 启用并立即启动 nftables】"
+        echo "  → 修复: 选择菜单【8 诊断与服务】→【2 启用并立即启动 nftables】"
     fi
 
     if [[ "$svc_active" == "active" ]]; then
         info "nftables 服务状态: 运行中"
     else
         warn "nftables 服务状态: 未运行"
-        echo "  → 修复: 选择菜单【8 诊断与服务】→【3 启用并立即启动 nftables】"
+        echo "  → 修复: 选择菜单【8 诊断与服务】→【2 启用并立即启动 nftables】"
     fi
 
     # 3. 转发规则是否加载
@@ -1125,11 +1125,11 @@ do_diagnose() {
             info "主配置 ${MAIN_CONF}: 已包含 include 指令"
         else
             warn "主配置 ${MAIN_CONF}: 缺少 include 指令（重启后规则可能丢失）"
-            echo "  → 修复: 选择菜单【8 诊断与服务】→【5 修复主配置 include】"
+            echo "  → 修复: 选择菜单【8 诊断与服务】→【4 修复主配置 include】"
         fi
     else
         warn "主配置 ${MAIN_CONF}: 不存在（重启后规则可能丢失）"
-        echo "  → 修复: 选择菜单【8 诊断与服务】→【5 修复主配置 include】"
+        echo "  → 修复: 选择菜单【8 诊断与服务】→【4 修复主配置 include】"
     fi
 
     if [[ -f "${CONF_FILE}" ]]; then
@@ -1574,18 +1574,16 @@ do_diagnostics_and_service() {
         echo "             诊断与服务"
         echo "========================================"
         echo "  1) 诊断 / 自检"
-        echo "  2) 查看服务状态"
-        echo "  3) 启用并立即启动 nftables"
-        echo "  4) 重载本脚本转发规则"
-        echo "  5) 修复主配置 include"
+        echo "  2) 启用并立即启动 nftables"
+        echo "  3) 重载本脚本转发规则"
+        echo "  4) 修复主配置 include"
         echo "  0) 返回主菜单"
         echo "========================================"
-        read -rp "请选择操作 [0-5]: " choice
+        read -rp "请选择操作 [0-4]: " choice
 
         case "$choice" in
             1) do_diagnose; pause_screen ;;
-            2) show_service_persistence_status; pause_screen ;;
-            3)
+            2)
                 if ! command -v systemctl &>/dev/null; then
                     err "未检测到 systemctl，请手动启动 nftables 服务。"
                 elif systemctl enable --now nftables 2>/dev/null; then
@@ -1596,7 +1594,7 @@ do_diagnostics_and_service() {
                 fi
                 pause_screen
                 ;;
-            4)
+            3)
                 if [[ ! -f "${CONF_FILE}" ]]; then
                     err "未找到 ${CONF_FILE}，请先新增一条转发规则。"
                 elif ! command -v nft &>/dev/null; then
@@ -1607,9 +1605,9 @@ do_diagnostics_and_service() {
                 fi
                 pause_screen
                 ;;
-            5) repair_main_conf_include; pause_screen ;;
+            4) repair_main_conf_include; pause_screen ;;
             0) return ;;
-            *) err "无效选择，请输入 0-5。"; pause_screen ;;
+            *) err "无效选择，请输入 0-4。"; pause_screen ;;
         esac
     done
 }
