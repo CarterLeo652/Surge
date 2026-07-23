@@ -105,15 +105,6 @@ family_display() {
     [[ "$1" == "ipv6" ]] && echo "IPv6" || echo "IPv4"
 }
 
-get_local_ip() {
-    local ip
-    ip=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1) || true
-    [[ -n "$ip" ]] && { echo "$ip"; return; }
-    ip=$(ip -4 addr show scope global 2>/dev/null | grep -oP 'inet \K[0-9.]+' | head -1) || true
-    [[ -n "$ip" ]] && { echo "$ip"; return; }
-    hostname -I 2>/dev/null | awk '{print $1}' || true
-}
-
 get_local_ipv6() {
     local ip
     ip=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '/ src / {for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}') || true
@@ -175,24 +166,6 @@ has_iptables() {
 
 has_ip6tables() {
     command -v ip6tables &>/dev/null && ip6tables -S &>/dev/null
-}
-
-# ============== iptables 规则持久化尝试 ==============
-try_persist_iptables() {
-    if command -v netfilter-persistent &>/dev/null; then
-        netfilter-persistent save >/dev/null 2>&1 && return 0
-    fi
-    if command -v iptables-save &>/dev/null; then
-        if [[ -d /etc/iptables ]]; then
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null && return 0
-        elif [[ -d /etc/sysconfig ]]; then
-            iptables-save > /etc/sysconfig/iptables 2>/dev/null && return 0
-        fi
-    fi
-    if command -v service &>/dev/null; then
-        service iptables save >/dev/null 2>&1 && return 0
-    fi
-    return 1
 }
 
 # ============== 检查目标是否仍被其他规则使用 ==============
@@ -290,14 +263,23 @@ firewall_open_port() {
     disp=$(proto_display "$proto")
 
     if systemctl is-active --quiet firewalld 2>/dev/null; then
+        # DNAT 后的数据包走 FORWARD 链；普通 rich port 规则只放行 INPUT，不能保证转发生效。
         if proto_has_tcp "$proto"; then
-            firewall-cmd --permanent --add-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"tcp\" accept" >/dev/null 2>&1 || true
+            firewall-cmd --permanent --direct --query-rule "$family" filter FORWARD 0 -d "$dest_ip" -p tcp --dport "$dport" -j ACCEPT >/dev/null 2>&1 || \
+            firewall-cmd --permanent --direct --add-rule "$family" filter FORWARD 0 -d "$dest_ip" -p tcp --dport "$dport" -j ACCEPT >/dev/null 2>&1 || {
+                warn "firewalld TCP 转发放行失败，请检查 direct 规则支持。"
+                return
+            }
         fi
         if proto_has_udp "$proto"; then
-            firewall-cmd --permanent --add-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"udp\" accept" >/dev/null 2>&1 || true
+            firewall-cmd --permanent --direct --query-rule "$family" filter FORWARD 0 -d "$dest_ip" -p udp --dport "$dport" -j ACCEPT >/dev/null 2>&1 || \
+            firewall-cmd --permanent --direct --add-rule "$family" filter FORWARD 0 -d "$dest_ip" -p udp --dport "$dport" -j ACCEPT >/dev/null 2>&1 || {
+                warn "firewalld UDP 转发放行失败，请检查 direct 规则支持。"
+                return
+            }
         fi
-        firewall-cmd --reload >/dev/null 2>&1 || true
-        info "已在 firewalld 中放行 IPv${family#ipv} 端口 ${lport} (${disp})。"
+        firewall-cmd --reload >/dev/null 2>&1 || { warn "firewalld 重载失败，放行规则可能尚未生效。"; return; }
+        info "已在 firewalld 中放行 IPv${family#ipv} 转发到 ${dest_ip}:${dport} (${disp})。"
         return
     fi
 
@@ -321,11 +303,9 @@ firewall_open_port() {
     fi
 
     if proto_has_tcp "$proto"; then
-        $cmd -C INPUT -p tcp --dport "$lport" -j ACCEPT 2>/dev/null || $cmd -I INPUT -p tcp --dport "$lport" -j ACCEPT 2>/dev/null || true
         $cmd -C FORWARD -d "$dest_ip" -p tcp --dport "$dport" -j ACCEPT 2>/dev/null || $cmd -I FORWARD -d "$dest_ip" -p tcp --dport "$dport" -j ACCEPT 2>/dev/null || true
     fi
     if proto_has_udp "$proto"; then
-        $cmd -C INPUT -p udp --dport "$lport" -j ACCEPT 2>/dev/null || $cmd -I INPUT -p udp --dport "$lport" -j ACCEPT 2>/dev/null || true
         $cmd -C FORWARD -d "$dest_ip" -p udp --dport "$dport" -j ACCEPT 2>/dev/null || $cmd -I FORWARD -d "$dest_ip" -p udp --dport "$dport" -j ACCEPT 2>/dev/null || true
     fi
     $cmd -C FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || $cmd -I FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
@@ -338,8 +318,19 @@ firewall_close_port() {
     family=$(ip_family "$dest_ip")
 
     if systemctl is-active --quiet firewalld 2>/dev/null; then
-        proto_has_tcp "$proto" && firewall-cmd --permanent --remove-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"tcp\" accept" >/dev/null 2>&1 || true
-        proto_has_udp "$proto" && firewall-cmd --permanent --remove-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"udp\" accept" >/dev/null 2>&1 || true
+        # 同时清理旧版脚本遗留的 INPUT rich rule 和当前版本的 FORWARD direct rule。
+        if proto_has_tcp "$proto"; then
+            if [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" tcp; then
+                firewall-cmd --permanent --direct --remove-rule "$family" filter FORWARD 0 -d "$dest_ip" -p tcp --dport "$dport" -j ACCEPT >/dev/null 2>&1 || true
+            fi
+            firewall-cmd --permanent --remove-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"tcp\" accept" >/dev/null 2>&1 || true
+        fi
+        if proto_has_udp "$proto"; then
+            if [[ "$force" == "force" ]] || ! dest_still_used "$dest_ip" "$dport" "$lport" udp; then
+                firewall-cmd --permanent --direct --remove-rule "$family" filter FORWARD 0 -d "$dest_ip" -p udp --dport "$dport" -j ACCEPT >/dev/null 2>&1 || true
+            fi
+            firewall-cmd --permanent --remove-rich-rule="rule family=\"$family\" port port=\"$lport\" protocol=\"udp\" accept" >/dev/null 2>&1 || true
+        fi
         firewall-cmd --reload >/dev/null 2>&1 || true
         return
     fi
@@ -615,13 +606,45 @@ EOF
 }
 
 reload_rules() {
+    command -v nft &>/dev/null || { err "nftables 未安装。"; return 1; }
+    [[ -f "${CONF_FILE}" ]] || { err "未找到配置文件 ${CONF_FILE}"; return 1; }
+
+    # 先在不改动运行中规则的情况下校验，避免无效配置先把现有转发表删掉。
+    if ! nft -c -f "${CONF_FILE}"; then
+        err "配置文件校验失败，未改动当前运行中的转发规则。"
+        return 1
+    fi
+
     nft delete table ip "${TABLE_NAME}" 2>/dev/null || true
     nft delete table ip6 "${TABLE_NAME}" 2>/dev/null || true
     nft -f "${CONF_FILE}" || { err "加载配置文件失败，请检查 ${CONF_FILE}"; return 1; }
     return 0
 }
 
-# ============== 备份与恢复 ==============
+# 参数: $1=变更前配置备份。失败时自动恢复配置文件和运行中规则。
+apply_rule_changes() {
+    local rollback_backup="$1"
+    [[ -f "$rollback_backup" ]] || { err "缺少回滚备份，已取消变更。"; return 1; }
+
+    if ! write_conf_file; then
+        load_rules
+        return 1
+    fi
+    reload_rules && return 0
+
+    err "应用规则失败，正在恢复变更前配置。"
+    cp "$rollback_backup" "${CONF_FILE}" 2>/dev/null || {
+        err "无法恢复配置文件，请手动恢复 $rollback_backup"
+        return 1
+    }
+    load_rules
+    reload_rules || err "自动恢复运行中规则失败，请手动检查 $rollback_backup"
+    return 1
+}
+
+# ====================================================
+# 功能 9：备份与恢复
+# ====================================================
 LAST_BACKUP=""
 
 backup_conf() {
@@ -691,12 +714,19 @@ restore_backup() {
     read -rp "确认恢复？[y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消。"; return; }
 
+    load_rules
+    local -a old_rules=("${RULES[@]}")
     backup_conf || { err "无法备份当前配置，已取消恢复。"; return; }
     rollback_backup="${LAST_BACKUP}"
     cp "${selected}" "${CONF_FILE}" 2>/dev/null || { err "写入备份失败。"; return; }
 
     load_rules
     if reload_rules; then
+        # 已不在备份中的规则，恢复后应同步撤销其防火墙放行；仍被恢复规则使用的放行会被保留。
+        for rule in "${old_rules[@]}"; do
+            IFS='|' read -r lport dip dport proto note <<< "${rule}"
+            firewall_close_port "${lport}" "${dip}" "${dport}" "${proto:-both}"
+        done
         for rule in "${RULES[@]}"; do
             IFS='|' read -r lport dip dport proto note <<< "${rule}"
             firewall_open_port "${lport}" "${dip}" "${dport}" "${proto:-both}"
@@ -844,6 +874,9 @@ check_firewall_status() {
     fi
 }
 
+# ====================================================
+# 功能 7：回源设置
+# ====================================================
 show_snat_status() {
     load_snat_settings
     echo "IPv4：$(snat_mode_display ipv4)"
@@ -857,15 +890,11 @@ show_snat_status() {
 apply_snat_settings() {
     backup_conf || { err "无法备份当前配置，已取消。"; return 1; }
     local rollback_backup="${LAST_BACKUP}"
-    if write_conf_file && reload_rules; then
+    if apply_rule_changes "$rollback_backup"; then
         info "回源设置已保存并生效。"
         log_action "更新回源设置"
         return 0
     fi
-    err "应用失败，正在恢复原配置。"
-    cp "${rollback_backup}" "${CONF_FILE}" 2>/dev/null || true
-    load_rules
-    reload_rules || err "原配置自动恢复失败，请手动检查 ${rollback_backup}。"
     return 1
 }
 
@@ -939,6 +968,9 @@ do_snat_settings() {
 }
 
 
+# ====================================================
+# 功能 8：诊断与服务
+# ====================================================
 repair_main_conf_include() {
     local include_line='include "/etc/nftables.d/*.conf"'
     if [[ -f "${MAIN_CONF}" ]] && grep -qF "$include_line" "${MAIN_CONF}" 2>/dev/null; then
@@ -1144,6 +1176,51 @@ do_diagnose() {
     echo ""
 }
 
+do_diagnostics_and_service() {
+    while true; do
+        clear_screen
+        echo "========================================"
+        echo "             诊断与服务"
+        echo "========================================"
+        echo "  1) 诊断 / 自检"
+        echo "  2) 启用并立即启动 nftables"
+        echo "  3) 重载本脚本转发规则"
+        echo "  4) 修复主配置 include"
+        echo "  0) 返回主菜单"
+        echo "========================================"
+        read -rp "请选择操作 [0-4]: " choice
+
+        case "$choice" in
+            1) do_diagnose; pause_screen ;;
+            2)
+                if ! command -v systemctl &>/dev/null; then
+                    err "未检测到 systemctl，请手动启动 nftables 服务。"
+                elif systemctl enable --now nftables 2>/dev/null; then
+                    info "nftables 已启用开机自启并正在运行。"
+                    log_action "启用并启动 nftables 服务"
+                else
+                    err "nftables 服务启用失败，请检查 systemctl status nftables。"
+                fi
+                pause_screen
+                ;;
+            3)
+                if [[ ! -f "${CONF_FILE}" ]]; then
+                    err "未找到 ${CONF_FILE}，请先新增一条转发规则。"
+                elif ! command -v nft &>/dev/null; then
+                    err "nftables 未安装。"
+                elif reload_rules; then
+                    info "本脚本转发规则已重载。"
+                    log_action "重载端口转发规则"
+                fi
+                pause_screen
+                ;;
+            4) repair_main_conf_include; pause_screen ;;
+            0) return ;;
+            *) err "无效选择，请输入 0-4。"; pause_screen ;;
+        esac
+    done
+}
+
 # ====================================================
 # 功能 1：安装 nftables
 # ====================================================
@@ -1157,8 +1234,8 @@ do_install() {
         warn "已有的配置文件将被备份（重命名为 .bak）。"
         read -rp "是否继续？[y/N]: " confirm
         if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            info "已取消，退出脚本。"
-            exit 0
+            info "已取消。"
+            return
         fi
 
         # 备份已有配置文件（重命名，不删除）
@@ -1185,7 +1262,7 @@ do_install() {
         enable_ip_forward
         enable_bbr_fq
         check_firewall_status
-        init_conf
+        init_conf || return
 
         # 加载主配置（flush + include），验证整条配置链路
         if ! nft -f "${MAIN_CONF}"; then
@@ -1240,7 +1317,7 @@ do_install() {
     enable_ip_forward
     enable_bbr_fq
     check_firewall_status
-    init_conf
+    init_conf || return
     # 先写好配置，再启用服务，确保服务启动时直接加载我们的配置
     if systemctl enable --now nftables 2>/dev/null; then
         info "已启用 nftables 服务。"
@@ -1331,10 +1408,9 @@ do_add() {
     read -rp "确认添加？[Y/n]: " confirm
     [[ "$confirm" =~ ^[Nn]$ ]] && { info "已取消。"; return; }
 
-    backup_conf
+    backup_conf || { err "无法备份当前配置，已取消添加。"; return; }
     RULES+=("${lport}|${dip}|${dport}|${proto}|${note}")
-    write_conf_file || return
-    if reload_rules; then
+    if apply_rule_changes "${LAST_BACKUP}"; then
         firewall_open_port "$lport" "$dip" "$dport" "$proto"
         info "转发规则添加成功。"
         log_action "新增 $(family_display "$family") 转发: ${lport} -> ${dip}:${dport}"
@@ -1409,11 +1485,14 @@ do_edit() {
 
     local network_changed=false
     [[ "$old_lport" != "$lport" || "$old_dip" != "$dip" || "$old_dport" != "$dport" || "$old_proto" != "$proto" ]] && network_changed=true
-    backup_conf
+    backup_conf || { err "无法备份当前配置，已取消修改。"; return; }
     RULES[$idx]="${lport}|${dip}|${dport}|${proto}|${note}"
-    write_conf_file || return
-    if ! $network_changed; then info "备注已更新。"; return; fi
-    if reload_rules; then
+    if ! $network_changed; then
+        write_conf_file || { load_rules; return; }
+        info "备注已更新。"
+        return
+    fi
+    if apply_rule_changes "${LAST_BACKUP}"; then
         firewall_close_port "$old_lport" "$old_dip" "$old_dport" "$old_proto"
         firewall_open_port "$lport" "$dip" "$dport" "$proto"
         info "转发规则修改成功。"
@@ -1470,15 +1549,11 @@ do_delete() {
     fi
 
     # 备份并移除
-    backup_conf
+    backup_conf || { err "无法备份当前配置，已取消删除。"; return; }
     unset 'RULES[$((choice-1))]'
     RULES=("${RULES[@]}")
 
-    if ! write_conf_file; then
-        return
-    fi
-
-    if reload_rules; then
+    if apply_rule_changes "${LAST_BACKUP}"; then
         # nft 规则已成功更新后，再清理防火墙放行（RULES 已移除该条，dest_still_used 能正确判断）
         firewall_close_port "$lport" "$dip" "$dport" "$proto"
         info "转发规则已删除: ${lport} ($(proto_display "$proto")) → ${dip}:${dport}"
@@ -1512,71 +1587,23 @@ do_clear_all() {
         return
     fi
 
-    backup_conf
+    backup_conf || { err "无法备份当前配置，已取消清空。"; return; }
 
-    # 先清理所有防火墙规则（清空场景用 force，无需检查共享）
+    local -a old_rules=("${RULES[@]}")
     local rule lport dip dport proto note
-    for rule in "${RULES[@]}"; do
-        IFS='|' read -r lport dip dport proto note <<< "$rule"
-        firewall_close_port "$lport" "$dip" "$dport" "${proto:-both}" "force"
-    done
 
     RULES=()
-    if ! write_conf_file; then
-        return
-    fi
-
-    if reload_rules; then
+    if apply_rule_changes "${LAST_BACKUP}"; then
+        # 配置和运行中规则确认更新后，再清理防火墙放行，避免失败时中断原有转发。
+        for rule in "${old_rules[@]}"; do
+            IFS='|' read -r lport dip dport proto note <<< "$rule"
+            firewall_close_port "$lport" "$dip" "$dport" "${proto:-both}" "force"
+        done
         info "所有转发规则已清空。"
         log_action "清空所有转发规则"
     else
         err "规则加载失败，请检查配置。"
     fi
-}
-
-do_diagnostics_and_service() {
-    while true; do
-        clear_screen
-        echo "========================================"
-        echo "             诊断与服务"
-        echo "========================================"
-        echo "  1) 诊断 / 自检"
-        echo "  2) 启用并立即启动 nftables"
-        echo "  3) 重载本脚本转发规则"
-        echo "  4) 修复主配置 include"
-        echo "  0) 返回主菜单"
-        echo "========================================"
-        read -rp "请选择操作 [0-4]: " choice
-
-        case "$choice" in
-            1) do_diagnose; pause_screen ;;
-            2)
-                if ! command -v systemctl &>/dev/null; then
-                    err "未检测到 systemctl，请手动启动 nftables 服务。"
-                elif systemctl enable --now nftables 2>/dev/null; then
-                    info "nftables 已启用开机自启并正在运行。"
-                    log_action "启用并启动 nftables 服务"
-                else
-                    err "nftables 服务启用失败，请检查 systemctl status nftables。"
-                fi
-                pause_screen
-                ;;
-            3)
-                if [[ ! -f "${CONF_FILE}" ]]; then
-                    err "未找到 ${CONF_FILE}，请先新增一条转发规则。"
-                elif ! command -v nft &>/dev/null; then
-                    err "nftables 未安装。"
-                elif reload_rules; then
-                    info "本脚本转发规则已重载。"
-                    log_action "重载端口转发规则"
-                fi
-                pause_screen
-                ;;
-            4) repair_main_conf_include; pause_screen ;;
-            0) return ;;
-            *) err "无效选择，请输入 0-4。"; pause_screen ;;
-        esac
-    done
 }
 
 # ====================================================
