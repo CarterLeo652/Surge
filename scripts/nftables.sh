@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# nftables 端口转发管理工具 v1.4
+# nftables 端口转发管理工具 v1.5
 # 交互式管理 DNAT 端口转发规则（支持 TCP / UDP / TCP+UDP 选择）
 #
 
@@ -652,6 +652,122 @@ check_firewall_status() {
     fi
 }
 
+# ============== 服务与持久化管理 ==============
+show_service_persistence_status() {
+    echo ""
+    echo "--- 服务与持久化状态 ---"
+
+    if command -v systemctl &>/dev/null; then
+        local enabled active
+        enabled=$(systemctl is-enabled nftables 2>/dev/null) || enabled="未启用"
+        active=$(systemctl is-active nftables 2>/dev/null) || active="未运行"
+        info "nftables 开机启动: ${enabled}"
+        info "nftables 服务状态: ${active}"
+    else
+        warn "未检测到 systemctl，无法管理 nftables 服务。"
+    fi
+
+    if [[ -f "${MAIN_CONF}" ]] && grep -qF 'include "/etc/nftables.d/*.conf"' "${MAIN_CONF}" 2>/dev/null; then
+        info "主配置 include: 已配置"
+    else
+        warn "主配置 include: 未配置"
+    fi
+
+    if [[ -f "${CONF_FILE}" ]]; then
+        info "转发配置文件: ${CONF_FILE}"
+    else
+        warn "转发配置文件: 不存在"
+    fi
+
+    if command -v nft &>/dev/null && nft list table ip "${TABLE_NAME}" &>/dev/null; then
+        info "运行中转发表: 已加载"
+    else
+        warn "运行中转发表: 未加载"
+    fi
+}
+
+repair_main_conf_include() {
+    local include_line='include "/etc/nftables.d/*.conf"'
+    if [[ -f "${MAIN_CONF}" ]] && grep -qF "$include_line" "${MAIN_CONF}" 2>/dev/null; then
+        info "主配置已包含 include 指令，无需修复。"
+        return
+    fi
+
+    warn "此操作只会创建或补充 ${MAIN_CONF} 的 include 指令，不会清空 nftables 规则。"
+    local confirm
+    read -rp "确认修复？[y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "已取消。"
+        return
+    fi
+
+    if [[ -f "${MAIN_CONF}" ]]; then
+        local ts backup
+        ts=$(date '+%Y%m%d_%H%M%S')
+        backup="${MAIN_CONF}.bak.${ts}"
+        if ! cp "${MAIN_CONF}" "$backup" 2>/dev/null; then
+            err "无法备份 ${MAIN_CONF}，已取消修复。"
+            return
+        fi
+        printf '\n%s\n' "$include_line" >> "${MAIN_CONF}" || {
+            err "无法写入 ${MAIN_CONF}"
+            return
+        }
+        info "已添加 include 指令；原文件备份: ${backup}"
+    else
+        mkdir -p "$(dirname "${MAIN_CONF}")" 2>/dev/null || true
+        cat > "${MAIN_CONF}" <<EOF
+#!/usr/sbin/nft -f
+${include_line}
+EOF
+        info "已创建最小主配置: ${MAIN_CONF}"
+    fi
+    log_action "修复 nftables 主配置 include"
+}
+
+do_service_management() {
+    while true; do
+        echo ""
+        echo "========================================"
+        echo "         服务与持久化管理"
+        echo "========================================"
+        echo "  1) 查看服务与持久化状态"
+        echo "  2) 启用并立即启动 nftables"
+        echo "  3) 重载本脚本转发规则"
+        echo "  4) 修复主配置 include（不清空规则）"
+        echo "  5) 返回主菜单"
+        echo "========================================"
+        read -rp "请选择操作 [1-5]: " choice
+
+        case "$choice" in
+            1) show_service_persistence_status ;;
+            2)
+                if ! command -v systemctl &>/dev/null; then
+                    err "未检测到 systemctl，请手动启动 nftables 服务。"
+                elif systemctl enable --now nftables 2>/dev/null; then
+                    info "nftables 已启用开机自启并正在运行。"
+                    log_action "启用并启动 nftables 服务"
+                else
+                    err "nftables 服务启用失败，请检查 systemctl status nftables。"
+                fi
+                ;;
+            3)
+                if [[ ! -f "${CONF_FILE}" ]]; then
+                    err "未找到 ${CONF_FILE}，请先新增一条转发规则。"
+                elif ! command -v nft &>/dev/null; then
+                    err "nftables 未安装。"
+                elif reload_rules; then
+                    info "本脚本转发规则已重载。"
+                    log_action "重载端口转发规则"
+                fi
+                ;;
+            4) repair_main_conf_include ;;
+            5) return ;;
+            *) err "无效选择，请输入 1-5。" ;;
+        esac
+    done
+}
+
 # ============== 诊断/自检 ==============
 do_diagnose() {
     echo ""
@@ -666,7 +782,7 @@ do_diagnose() {
         info "IPv4 转发: 已开启"
     else
         err  "IPv4 转发: 未开启 (当前值: ${ip_fwd})"
-        echo "  → 修复: 选择菜单【安装 nftables】会自动开启"
+        echo "  → 修复: sysctl -w net.ipv4.ip_forward=1"
     fi
 
     # 2. nftables 状态
@@ -685,14 +801,14 @@ do_diagnose() {
         info "nftables 开机启动: 是"
     else
         warn "nftables 开机启动: 否（重启后规则可能丢失）"
-        echo "  → 修复: systemctl enable nftables"
+        echo "  → 修复: 选择菜单【服务与持久化管理】→【启用并立即启动 nftables】"
     fi
 
     if [[ "$svc_active" == "active" ]]; then
         info "nftables 服务状态: 运行中"
     else
         warn "nftables 服务状态: 未运行"
-        echo "  → 修复: systemctl start nftables"
+        echo "  → 修复: 选择菜单【服务与持久化管理】→【启用并立即启动 nftables】"
     fi
 
     # 3. 转发规则是否加载
@@ -758,11 +874,11 @@ do_diagnose() {
             info "主配置 ${MAIN_CONF}: 已包含 include 指令"
         else
             warn "主配置 ${MAIN_CONF}: 缺少 include 指令（重启后规则可能丢失）"
-            echo "  → 修复: 选择菜单【安装 nftables】会自动添加"
+            echo "  → 修复: 选择菜单【服务与持久化管理】→【修复主配置 include】"
         fi
     else
         warn "主配置 ${MAIN_CONF}: 不存在（重启后规则可能丢失）"
-        echo "  → 修复: 选择菜单【安装 nftables】会自动创建"
+        echo "  → 修复: 选择菜单【服务与持久化管理】→【修复主配置 include】"
     fi
 
     if [[ -f "${CONF_FILE}" ]]; then
@@ -1320,7 +1436,7 @@ main_menu() {
     while true; do
         echo ""
         echo "========================================"
-        echo "   nftables 端口转发管理工具 v1.4"
+        echo "   nftables 端口转发管理工具 v1.5"
         echo "========================================"
         echo "  1) 安装 nftables"
         echo "  2) 查看现有端口转发"
@@ -1329,9 +1445,10 @@ main_menu() {
         echo "  5) 删除端口转发"
         echo "  6) 清空本脚本管理的全部转发"
         echo "  7) 诊断/自检"
-        echo "  8) 退出"
+        echo "  8) 服务与持久化管理"
+        echo "  9) 退出"
         echo "========================================"
-        read -rp "请选择操作 [1-8]: " choice
+        read -rp "请选择操作 [1-9]: " choice
 
         case "$choice" in
             1) do_install ;;
@@ -1341,12 +1458,13 @@ main_menu() {
             5) do_delete ;;
             6) do_clear_all ;;
             7) do_diagnose ;;
-            8)
+            8) do_service_management ;;
+            9)
                 info "再见！"
                 exit 0
                 ;;
             *)
-                err "无效选择，请输入 1-8。"
+                err "无效选择，请输入 1-9。"
                 ;;
         esac
     done
