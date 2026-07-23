@@ -40,10 +40,9 @@ draw_header() {
     if command -v systemctl &>/dev/null; then
         service=$(systemctl is-active nftables 2>/dev/null || echo "未运行")
     fi
-    echo "╭────────────────────────────────────────────────────╮"
-    echo "│              NFT Port Forward v2.0                 │"
-    printf "│ 服务：%-9s  规则：%-4s 条  回源：%-8s │\n" "$service" "$count" "$(snat_mode_display "$SNAT_MODE")"
-    echo "╰────────────────────────────────────────────────────╯"
+    printf '\n  NFT Port Forward 2.0\n'
+    printf '  服务: %-8s  规则: %-4s 条  回源: %s\n' "$service" "$count" "$(snat_mode_display "$SNAT_MODE")"
+    printf '  ──────────────────────────────────────\n'
 }
 
 check_root() {
@@ -446,7 +445,7 @@ add_rule() {
     dip=$(ask_ip "目标 IP") || return
     dport=$(ask_port "目标端口" "$lport") || return
     read -rp "备注（可留空）: " note; note=$(sanitize_note "$note")
-    echo "\n将新增：$(protocol_display "$proto") ${lport} → ${dip}:${dport}，回源：$(snat_mode_display "$SNAT_MODE")"
+    printf '\n将新增：%s %s → %s:%s，回源：%s\n' "$(protocol_display "$proto")" "$lport" "$dip" "$dport" "$(snat_mode_display "$SNAT_MODE")"
     [[ -n "$note" ]] && echo "备注：${note}"
     read -rp "输入 y 确认: " confirm; [[ "$confirm" == "y" || "$confirm" == "Y" ]] || return
     id=$(next_rule_id); backup=$(create_backup) || { err "创建备份失败。"; pause; return; }
@@ -473,7 +472,7 @@ edit_rule() {
     dport=$(ask_port "目标端口" "$old_dport") || return
     read -rp "备注 [${old_note:--}；留空保留，- 清空]: " input
     if [[ "$input" == "-" ]]; then note=""; elif [[ -z "$input" ]]; then note="$old_note"; else note=$(sanitize_note "$input"); fi
-    echo "\n将修改为：$(protocol_display "$proto") ${lport} → ${dip}:${dport}"
+    printf '\n将修改为：%s %s → %s:%s\n' "$(protocol_display "$proto")" "$lport" "$dip" "$dport"
     read -rp "输入 y 确认: " confirm; [[ "$confirm" == "y" || "$confirm" == "Y" ]] || return
     backup=$(create_backup) || { err "创建备份失败。"; pause; return; }
     RULES[$idx]="${id}|${lport}|${proto}|${dip}|${dport}|${note}"
@@ -505,7 +504,7 @@ snat_menu() {
         draw_header
         echo "全局回源模式：$(snat_mode_display "$SNAT_MODE")"
         [[ "$SNAT_MODE" == "fixed" ]] && echo "固定 SNAT IP：${FIXED_SNAT_IP:-未设置}"
-        echo "\n  1) 固定 SNAT IP"
+        printf '\n  1) 固定 SNAT IP\n'
         echo "  2) 自动 MASQUERADE"
         echo "  0) 返回"
         read -rp "请选择: " choice
@@ -639,10 +638,11 @@ EOF
 initialization_menu() {
     while true; do
         draw_header
-        echo "安装与配置\n"
+        printf '\n  安装与配置\n'
+        printf '  ──────────\n'
         echo "  1) 安装依赖并安全初始化"
         echo "  2) 清空并接管 nftables 规则"
-        echo "  0) 返回"
+        printf '\n  0) 返回\n'
         read -rp "请选择: " choice
         case "$choice" in
             1) safe_initialize ;;
@@ -657,15 +657,15 @@ main_menu() {
     ensure_state || { err "无法初始化状态目录。"; exit 1; }
     while true; do
         draw_header
-        echo "\n  转发规则"
-        echo "  [1] 查看规则        [2] 新增规则"
-        echo "  [3] 修改规则        [4] 删除规则"
-        echo "\n  网络与服务"
-        echo "  [5] 全局回源模式    [6] 服务与开机自启"
-        echo "\n  维护工具"
-        echo "  [7] 诊断与测试      [8] 备份与恢复"
-        echo "  [9] 安装与配置"
-        echo "\n  [0] 退出"
+        printf '\n  转发规则\n'
+        echo "  1) 查看规则        2) 新增规则"
+        echo "  3) 修改规则        4) 删除规则"
+        printf '\n  回源与服务\n'
+        echo "  5) 全局回源模式    6) 服务与开机自启"
+        printf '\n  维护\n'
+        echo "  7) 诊断与测试      8) 备份与恢复"
+        echo "  9) 安装与配置"
+        printf '\n  0) 退出\n\n'
         read -rp "请选择操作: " choice
         case "$choice" in
             1) draw_header; print_rules; pause ;;
