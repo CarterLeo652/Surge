@@ -1599,6 +1599,27 @@ do_clear_all() {
     fi
 }
 
+do_diagnostics_and_service() {
+    while true; do
+        clear_screen
+        echo "========================================"
+        echo "             诊断与服务"
+        echo "========================================"
+        echo "  1) 诊断 / 自检"
+        echo "  2) 服务与持久化管理"
+        echo "  0) 返回主菜单"
+        echo "========================================"
+        read -rp "请选择操作 [0-2]: " choice
+
+        case "$choice" in
+            1) do_diagnose; pause_screen ;;
+            2) do_service_management ;;
+            0) return ;;
+            *) err "无效选择，请输入 0-2。"; pause_screen ;;
+        esac
+    done
+}
+
 # ====================================================
 # 主菜单
 # ====================================================
@@ -1614,8 +1635,8 @@ main_menu() {
         echo "  4) 修改端口转发"
         echo "  5) 删除端口转发"
         echo "  6) 清空本脚本管理的全部转发"
-        echo "  7) 诊断/自检"
-        echo "  8) 服务与回源设置"
+        echo "  7) 回源设置"
+        echo "  8) 诊断与服务"
         echo "  9) 备份与恢复"
         echo "  0) 退出"
         echo "========================================"
@@ -1628,8 +1649,8 @@ main_menu() {
             4) do_edit; pause_screen ;;
             5) do_delete; pause_screen ;;
             6) do_clear_all; pause_screen ;;
-            7) do_diagnose; pause_screen ;;
-            8) do_service_management ;;
+            7) do_snat_settings ;;
+            8) do_diagnostics_and_service ;;
             9) do_backup_restore ;;
             0) info "再见！"; exit 0 ;;
             *) err "无效选择，请输入 0-9。"; pause_screen ;;
