@@ -676,8 +676,8 @@ restore_backup() {
     selected="${BACKUP_FILES[$((choice - 1))]}"
 
     warn "将恢复: $(basename "${selected}")"
-    read -rp "输入 RESTORE 确认恢复: " confirm
-    [[ "$confirm" == "RESTORE" ]] || { info "已取消。"; return; }
+    read -rp "确认恢复？[y/N]: " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { info "已取消。"; return; }
 
     backup_conf || { err "无法备份当前配置，已取消恢复。"; return; }
     rollback_backup="${LAST_BACKUP}"
@@ -997,53 +997,6 @@ EOF
         info "已创建最小主配置: ${MAIN_CONF}"
     fi
     log_action "修复 nftables 主配置 include"
-}
-
-do_service_management() {
-    while true; do
-        clear_screen
-        echo "========================================"
-        echo "           服务与回源设置"
-        echo "========================================"
-        echo "  1) 查看服务与持久化状态"
-        echo "  2) 启用并立即启动 nftables"
-        echo "  3) 重载本脚本转发规则"
-        echo "  4) 修复主配置 include（不清空规则）"
-        echo "  5) 回源设置"
-        echo "  0) 返回主菜单"
-        echo "========================================"
-        read -rp "请选择操作 [0-5]: " choice
-
-        case "$choice" in
-            1) show_service_persistence_status; pause_screen ;;
-            2)
-                if ! command -v systemctl &>/dev/null; then
-                    err "未检测到 systemctl，请手动启动 nftables 服务。"
-                elif systemctl enable --now nftables 2>/dev/null; then
-                    info "nftables 已启用开机自启并正在运行。"
-                    log_action "启用并启动 nftables 服务"
-                else
-                    err "nftables 服务启用失败，请检查 systemctl status nftables。"
-                fi
-                pause_screen
-                ;;
-            3)
-                if [[ ! -f "${CONF_FILE}" ]]; then
-                    err "未找到 ${CONF_FILE}，请先新增一条转发规则。"
-                elif ! command -v nft &>/dev/null; then
-                    err "nftables 未安装。"
-                elif reload_rules; then
-                    info "本脚本转发规则已重载。"
-                    log_action "重载端口转发规则"
-                fi
-                pause_screen
-                ;;
-            4) repair_main_conf_include; pause_screen ;;
-            5) do_snat_settings ;;
-            0) return ;;
-            *) err "无效选择，请输入 0-5。"; pause_screen ;;
-        esac
-    done
 }
 
 # ============== 诊断/自检 ==============
@@ -1606,21 +1559,48 @@ do_diagnostics_and_service() {
         echo "             诊断与服务"
         echo "========================================"
         echo "  1) 诊断 / 自检"
-        echo "  2) 服务与持久化管理"
+        echo "  2) 查看服务状态"
+        echo "  3) 启用并立即启动 nftables"
+        echo "  4) 重载本脚本转发规则"
+        echo "  5) 修复主配置 include"
         echo "  0) 返回主菜单"
         echo "========================================"
-        read -rp "请选择操作 [0-2]: " choice
+        read -rp "请选择操作 [0-5]: " choice
 
         case "$choice" in
             1) do_diagnose; pause_screen ;;
-            2) do_service_management ;;
+            2) show_service_persistence_status; pause_screen ;;
+            3)
+                if ! command -v systemctl &>/dev/null; then
+                    err "未检测到 systemctl，请手动启动 nftables 服务。"
+                elif systemctl enable --now nftables 2>/dev/null; then
+                    info "nftables 已启用开机自启并正在运行。"
+                    log_action "启用并启动 nftables 服务"
+                else
+                    err "nftables 服务启用失败，请检查 systemctl status nftables。"
+                fi
+                pause_screen
+                ;;
+            4)
+                if [[ ! -f "${CONF_FILE}" ]]; then
+                    err "未找到 ${CONF_FILE}，请先新增一条转发规则。"
+                elif ! command -v nft &>/dev/null; then
+                    err "nftables 未安装。"
+                elif reload_rules; then
+                    info "本脚本转发规则已重载。"
+                    log_action "重载端口转发规则"
+                fi
+                pause_screen
+                ;;
+            5) repair_main_conf_include; pause_screen ;;
             0) return ;;
-            *) err "无效选择，请输入 0-2。"; pause_screen ;;
+            *) err "无效选择，请输入 0-5。"; pause_screen ;;
         esac
     done
 }
 
 # ====================================================
+# 主菜单# ====================================================
 # 主菜单
 # ====================================================
 main_menu() {
