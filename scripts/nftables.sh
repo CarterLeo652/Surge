@@ -938,39 +938,6 @@ do_snat_settings() {
     done
 }
 
-# ============== 服务与持久化管理 ==============
-show_service_persistence_status() {
-    echo ""
-    echo "--- 服务与持久化状态 ---"
-
-    if command -v systemctl &>/dev/null; then
-        local enabled active
-        enabled=$(systemctl is-enabled nftables 2>/dev/null) || enabled="未启用"
-        active=$(systemctl is-active nftables 2>/dev/null) || active="未运行"
-        info "nftables 开机启动: ${enabled}"
-        info "nftables 服务状态: ${active}"
-    else
-        warn "未检测到 systemctl，无法管理 nftables 服务。"
-    fi
-
-    if [[ -f "${MAIN_CONF}" ]] && grep -qF 'include "/etc/nftables.d/*.conf"' "${MAIN_CONF}" 2>/dev/null; then
-        info "主配置 include: 已配置"
-    else
-        warn "主配置 include: 未配置"
-    fi
-
-    if [[ -f "${CONF_FILE}" ]]; then
-        info "转发配置文件: ${CONF_FILE}"
-    else
-        warn "转发配置文件: 不存在"
-    fi
-
-    if command -v nft &>/dev/null && { nft list table ip "${TABLE_NAME}" &>/dev/null || nft list table ip6 "${TABLE_NAME}" &>/dev/null; }; then
-        info "运行中转发表: 已加载"
-    else
-        warn "运行中转发表: 未加载"
-    fi
-}
 
 repair_main_conf_include() {
     local include_line='include "/etc/nftables.d/*.conf"'
