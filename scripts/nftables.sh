@@ -269,6 +269,18 @@ test_udp_reachable() {
     return 1
 }
 
+# ============== TCP 可达性测试 ==============
+# IPv6 使用 nc，避免 bash /dev/tcp 对 IPv6 字面量的兼容性问题
+test_tcp_reachable() {
+    local dip="$1" dport="$2"
+    if [[ "$(ip_family "$dip")" == "ipv6" ]]; then
+        command -v nc &>/dev/null || return 2
+        timeout 3 nc -6 -z -w2 "$dip" "$dport" 2>/dev/null
+    else
+        timeout 3 bash -c ">/dev/tcp/${dip}/${dport}" 2>/dev/null
+    fi
+}
+
 # ============== firewalld / iptables 端口放行 ==============
 # 参数: $1=本机监听端口  $2=目标IP  $3=目标端口  $4=协议(tcp|udp|both，默认 both)
 firewall_open_port() {
@@ -1040,14 +1052,14 @@ do_diagnose() {
         info "nftables 开机启动: 是"
     else
         warn "nftables 开机启动: 否（重启后规则可能丢失）"
-        echo "  → 修复: 选择菜单【服务与持久化管理】→【启用并立即启动 nftables】"
+        echo "  → 修复: 选择菜单【8 诊断与服务】→【3 启用并立即启动 nftables】"
     fi
 
     if [[ "$svc_active" == "active" ]]; then
         info "nftables 服务状态: 运行中"
     else
         warn "nftables 服务状态: 未运行"
-        echo "  → 修复: 选择菜单【服务与持久化管理】→【启用并立即启动 nftables】"
+        echo "  → 修复: 选择菜单【8 诊断与服务】→【3 启用并立即启动 nftables】"
     fi
 
     # 3. 转发规则是否加载
@@ -1113,11 +1125,11 @@ do_diagnose() {
             info "主配置 ${MAIN_CONF}: 已包含 include 指令"
         else
             warn "主配置 ${MAIN_CONF}: 缺少 include 指令（重启后规则可能丢失）"
-            echo "  → 修复: 选择菜单【服务与持久化管理】→【修复主配置 include】"
+            echo "  → 修复: 选择菜单【8 诊断与服务】→【5 修复主配置 include】"
         fi
     else
         warn "主配置 ${MAIN_CONF}: 不存在（重启后规则可能丢失）"
-        echo "  → 修复: 选择菜单【服务与持久化管理】→【修复主配置 include】"
+        echo "  → 修复: 选择菜单【8 诊断与服务】→【5 修复主配置 include】"
     fi
 
     if [[ -f "${CONF_FILE}" ]]; then
@@ -1140,20 +1152,23 @@ do_diagnose() {
                 # TCP 测试：建立连接即视为通
                 if proto_has_tcp "$proto"; then
                     printf "  测试 %s:%s (TCP) ... " "$dip" "$dport"
-                    if timeout 3 bash -c ">/dev/tcp/${dip}/${dport}" 2>/dev/null; then
-                        printf "\033[32m通\033[0m\n"
-                    else
-                        printf "\033[31m不通或超时\033[0m\n"
-                    fi
+                    local tcp_result
+                    test_tcp_reachable "$dip" "$dport"
+                    tcp_result=$?
+                    case "$tcp_result" in
+                        0) printf "\033[32m通\033[0m\n" ;;
+                        2) printf "\033[33m无法检测（IPv6 TCP 需要 nc）\033[0m\n" ;;
+                        *) printf "\033[31m不通或超时\033[0m\n" ;;
+                    esac
                 fi
 
                 # UDP 测试：UDP 无连接，只能做弱判定
                 if proto_has_udp "$proto"; then
-                    printf "  测试 %s:%s (UDP) ... " "$dip" "$dport"
+                    printf "  测试 %s:%s (UDP，仅弱探测) ... " "$dip" "$dport"
                     if test_udp_reachable "$dip" "$dport"; then
-                        printf "\033[32m可达\033[0m\n"
+                        printf "\033[32m未发现拒绝\033[0m\n"
                     else
-                        printf "\033[31m不可达\033[0m\n"
+                        printf "\033[33m无法确认\033[0m\n"
                     fi
                 fi
             done
@@ -1600,7 +1615,6 @@ do_diagnostics_and_service() {
 }
 
 # ====================================================
-# 主菜单# ====================================================
 # 主菜单
 # ====================================================
 main_menu() {
