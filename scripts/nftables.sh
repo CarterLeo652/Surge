@@ -1377,12 +1377,15 @@ do_install() {
 # ====================================================
 print_rules() {
     local idx=1 rule lport dip dport proto note
-    echo ""
+    printf '\n当前端口转发（%s 条）\n' "${#RULES[@]}"
+    echo "────────────────────────"
     for rule in "${RULES[@]}"; do
         IFS='|' read -r lport dip dport proto note <<< "$rule"
         local target="${dip}:${dport}"
         [[ "$(ip_family "$dip")" == "ipv6" ]] && target="[${dip}]:${dport}"
-        printf '\033[1m[%s]\033[0m %s · %s    %s → %s\n' "$idx" "$(family_display "$(ip_family "$dip")")" "$(proto_display "${proto:-both}")" "$lport" "$target"
+        printf '\033[1m[%s]\033[0m %s · %s\n' "$idx" "$(family_display "$(ip_family "$dip")")" "$(proto_display "${proto:-both}")"
+        printf '    本机端口：%s\n' "$lport"
+        printf '    目标地址：%s\n' "$target"
         [[ -n "$note" ]] && printf '    备注：%s\n' "$note"
         (( idx < ${#RULES[@]} )) && echo ""
         ((idx++))
