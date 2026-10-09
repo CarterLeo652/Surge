@@ -4,8 +4,9 @@ export PATH
 
 #=================================================
 #   System  : CentOS 6/7, Debian 8+, Ubuntu 16+
-#   Desc    : BBR一键加速 + TCP深度调优
-#   Version : 2.0.10
+#   Desc    : BBR 配置管理与按机器/线路自适应 TCP 调优
+#   Version : 2.1.0
+#   Scope   : BBR 作用于本机发送的 TCP；纯 nft 转发连接由两端控制拥塞。
 #=================================================
 
 # ────────────────────────── 颜色定义 ──────────────────────────
@@ -17,7 +18,7 @@ CYAN='\033[0;96m'
 BOLD='\033[1m'
 PLAIN='\033[0m'
 
-sh_ver="2.0.10"
+sh_ver="2.1.0"
 
 # ────────────────────────── 通用工具函数 ──────────────────────────
 info()    { echo -e "${BLUE}[INFO]${PLAIN}  $*"; }
@@ -34,7 +35,7 @@ banner() {
     echo -e "${CYAN}"
     echo "  ╔══════════════════════════════════════════════════════╗"
     echo "  ║                                                      ║"
-    printf '  ║     BBR 一键加速 + TCP 深度调优  v%s%*s║\n' "$sh_ver" "$((19 - ${#sh_ver}))" ''
+    printf '  ║     BBR 配置管理               v%s%*s║\n' "$sh_ver" "$((19 - ${#sh_ver}))" ''
     echo "  ║     适用于 CentOS 6/7 · Debian 8+ · Ubuntu 16+       ║"
     echo "  ║                                                      ║"
     echo "  ╚══════════════════════════════════════════════════════╝"
@@ -59,79 +60,6 @@ fi
 ARCH=$(uname -m)
 [[ $ARCH == "x86_64" ]] && ARCH_NAME="amd64" || ARCH_NAME=$ARCH
 
-# ────────────────────────── 依赖检查与安装 ──────────────────────────
-check_dependencies() {
-    hr
-    info "检查系统依赖..."
-
-    if [[ "$OS" =~ centos|rhel|fedora ]]; then
-        PKG_INSTALL="yum install -y -q"
-        DEPS="ca-certificates"
-    elif [[ "$OS" =~ debian|ubuntu ]]; then
-        PKG_INSTALL="apt-get install -y -qq"
-        DEPS="ca-certificates"
-    else
-        warn "未知包管理器，跳过依赖检查"
-        return 0
-    fi
-
-    local need_install=()
-    for dep in $DEPS; do
-        local installed=0
-        if [[ "$dep" == "ca-certificates" ]]; then
-            [[ -f /etc/ssl/certs/ca-certificates.crt || -f /etc/pki/tls/certs/ca-bundle.crt ]] && installed=1
-        else
-            command -v "$dep" &>/dev/null && installed=1
-        fi
-        [[ $installed -eq 0 ]] && need_install+=("$dep")
-    done
-
-    if [[ ${#need_install[@]} -gt 0 ]]; then
-        warn "缺少依赖: ${need_install[*]}，正在安装..."
-        if [[ "$OS" =~ debian|ubuntu ]]; then
-            apt-get update -qq
-            $PKG_INSTALL "${need_install[@]}"
-            update-ca-certificates 2>/dev/null
-        else
-            $PKG_INSTALL "${need_install[@]}"
-            update-ca-trust force-enable 2>/dev/null
-        fi
-        [[ $? -eq 0 ]] && ok "依赖安装完成" || warn "部分依赖安装失败，可能影响运行"
-    else
-        ok "所有依赖已就绪"
-    fi
-}
-
-# ────────────────────────── 虚拟化检测 ──────────────────────────
-check_virt() {
-    hr
-    info "检测虚拟化类型..."
-
-    if command -v systemd-detect-virt &>/dev/null; then
-        virt_type=$(systemd-detect-virt)
-    elif command -v virt-what &>/dev/null; then
-        virt_type=$(virt-what | head -1)
-    elif grep -q "openvz" /proc/vz/version 2>/dev/null || grep -q "openvz" /proc/cpuinfo 2>/dev/null; then
-        virt_type="openvz"
-    else
-        virt_type="unknown"
-    fi
-
-    ok "虚拟化类型: ${BOLD}${virt_type}${PLAIN}"
-
-    if [[ "$virt_type" == "openvz" ]]; then
-        echo ""
-        echo -e "${RED}  ┌─────────────────────────────────────────────────┐${PLAIN}"
-        echo -e "${RED}  │  ⚠  警告：检测到 OpenVZ 虚拟化                  │${PLAIN}"
-        echo -e "${RED}  │     OpenVZ 容器无法更换内核，无法启用 BBR        │${PLAIN}"
-        echo -e "${RED}  │     建议更换为 KVM / Xen 虚拟化的 VPS            │${PLAIN}"
-        echo -e "${RED}  └─────────────────────────────────────────────────┘${PLAIN}"
-        echo ""
-        read -rp "  是否继续（可能失败）? [y/N]: " continue_openvz
-        [[ ! "$continue_openvz" =~ ^[Yy]$ ]] && exit 1
-    fi
-}
-
 # ────────────────────────── /boot 空间检查 ──────────────────────────
 check_boot_space() {
     hr
@@ -150,78 +78,6 @@ check_boot_space() {
     fi
 }
 
-# ────────────────────────── CentOS EOL 源修复（改用官方 Vault）──────────────────────────
-fixCentOSRepo() {
-    [[ ! "$OS" =~ centos ]] && return
-    [[ "$VER" != "6" && "$VER" != "7" && "$VER" != "8" ]] && return
-
-    hr
-    warn "CentOS ${VER} 官方源已停服，切换到官方 Vault 源..."
-    mkdir -p /etc/yum.repos.d/backup
-    mv /etc/yum.repos.d/CentOS-*.repo /etc/yum.repos.d/backup/ 2>/dev/null
-
-    local vault_base="https://vault.centos.org"
-
-    if [[ "$VER" == "7" ]]; then
-        cat > /etc/yum.repos.d/CentOS-Vault.repo <<EOF
-[base]
-name=CentOS-7-Vault-Base
-baseurl=${vault_base}/7.9.2009/os/\$basearch/
-gpgcheck=0
-enabled=1
-
-[updates]
-name=CentOS-7-Vault-Updates
-baseurl=${vault_base}/7.9.2009/updates/\$basearch/
-gpgcheck=0
-enabled=1
-
-[extras]
-name=CentOS-7-Vault-Extras
-baseurl=${vault_base}/7.9.2009/extras/\$basearch/
-gpgcheck=0
-enabled=1
-EOF
-    elif [[ "$VER" == "6" ]]; then
-        cat > /etc/yum.repos.d/CentOS-Vault.repo <<EOF
-[base]
-name=CentOS-6-Vault-Base
-baseurl=${vault_base}/6.10/os/\$basearch/
-gpgcheck=0
-enabled=1
-
-[updates]
-name=CentOS-6-Vault-Updates
-baseurl=${vault_base}/6.10/updates/\$basearch/
-gpgcheck=0
-enabled=1
-EOF
-    elif [[ "$VER" == "8" ]]; then
-        cat > /etc/yum.repos.d/CentOS-Vault.repo <<EOF
-[baseos]
-name=CentOS-8-Vault-BaseOS
-baseurl=${vault_base}/8.5.2111/BaseOS/\$basearch/os/
-gpgcheck=0
-enabled=1
-
-[appstream]
-name=CentOS-8-Vault-AppStream
-baseurl=${vault_base}/8.5.2111/AppStream/\$basearch/os/
-gpgcheck=0
-enabled=1
-
-[extras]
-name=CentOS-8-Vault-Extras
-baseurl=${vault_base}/8.5.2111/extras/\$basearch/os/
-gpgcheck=0
-enabled=1
-EOF
-    fi
-
-    yum clean all >/dev/null 2>&1
-    ok "CentOS ${VER} Vault 源配置完成（使用官方 vault.centos.org）"
-}
-
 # ────────────────────────── 系统默认拥塞控制检测 ──────────────────────────
 # 此处判断新建 TCP 连接的默认算法，不代表每一条现有连接都在使用 BBR。
 check_bbr_status() {
@@ -230,30 +86,23 @@ check_bbr_status() {
     [[ "$cc" == "bbr" ]]
 }
 
-# ────────────────────────── 内核版本检测 ──────────────────────────
-check_kernel_native_bbr() {
-    local kver major minor
-    kver=$(uname -r | cut -d- -f1)
-    major=$(echo "$kver" | cut -d. -f1)
-    minor=$(echo "$kver" | cut -d. -f2)
-
-    if [[ $major -gt 5 ]] || [[ $major -eq 5 && $minor -ge 4 ]]; then
-        ok "内核 ${kver} 原生支持 BBR（最佳）"
+# ────────────────────────── 检查当前内核是否实际提供 BBR ──────────────────────────
+check_bbr_available() {
+    local available
+    available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null) || available=""
+    if [[ "$available" =~ (^|[[:space:]])bbr($|[[:space:]]) ]]; then
+        ok "当前内核提供 BBR"
         return 0
-    elif [[ $major -eq 4 && $minor -ge 9 ]] || [[ $major -ge 5 ]]; then
-        warn "内核 ${kver} 支持 BBR（建议升级到 5.4+）"
-        return 0
-    else
-        error "内核 ${kver} 不支持 BBR，需要升级内核"
-        return 1
     fi
+    error "当前内核或容器未提供 BBR（可用算法: ${available:-未知}）"
+    return 1
 }
 
 # ────────────────────────── sysctl 兼容写入（兼容 LXC/容器）──────────────────────────
 # 优先用 sysctl -w 逐条写入，避免 sysctl -p 在容器内遇到不支持的参数时中途退出
 sysctl_apply_file() {
     local conf_file="$1"
-    local skipped=0
+    local skipped=0 actual
 
     while IFS= read -r line; do
         # 跳过注释行和空行
@@ -273,10 +122,48 @@ sysctl_apply_file() {
             # 某些内核或容器不允许写入该参数，继续处理其余配置。
             warn "参数写入失败: ${key} (${err})"
             (( skipped++ ))
+        else
+            actual=$(sysctl -n "$key" 2>/dev/null) || actual=""
+            if [[ "${actual//[[:space:]]/}" != "${value//[[:space:]]/}" ]]; then
+                warn "参数写入后未达到目标值: ${key}（实际: ${actual:-未知}）"
+                (( skipped++ ))
+            fi
         fi
     done < "$conf_file"
 
     [[ $skipped -eq 0 ]]
+}
+
+cleanup_temp_files() {
+    local file
+    for file in "$@"; do
+        [[ -n "$file" ]] && rm -f -- "$file"
+    done
+}
+
+# 只在当前运行值确实来自本脚本配置时，允许按新线路测量值调低旧上限。
+managed_setting_matches() {
+    local key="$1" current="$2" file configured
+    for file in /etc/sysctl.d/99-tcp-tune.conf /etc/sysctl.d/99-bbr.conf; do
+        [[ "$file" == *99-bbr.conf ]] && {
+            is_managed_conf "$file" bbr || continue
+        }
+        [[ "$file" == *99-tcp-tune.conf ]] && {
+            is_managed_conf "$file" tcp || continue
+        }
+        configured=$(awk -F= -v wanted="$key" '
+            /^[[:space:]]*#/ {next}
+            NF >= 2 {
+                name=$1; gsub(/[[:space:]]/, "", name)
+                if (name == wanted) {
+                    value=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                    print value
+                }
+            }
+        ' "$file" | tail -n 1)
+        [[ -n "$configured" && "${configured//[[:space:]]/}" == "${current//[[:space:]]/}" ]] && return 0
+    done
+    return 1
 }
 
 # ────────────────────────── 优化配置归属与备份 ──────────────────────────
@@ -319,13 +206,18 @@ remove_managed_conf() {
         return 1
     fi
 
+    # 保留脚本生成文件的原样副本，便于核对或手工恢复；扩展名不是 .conf，不会被 sysctl 加载。
+    local removed_archive
+    removed_archive=$(mktemp "${conf_file}.removed.XXXXXX") || return 1
+    cp -p -- "$conf_file" "$removed_archive" || { rm -f -- "$removed_archive"; error "无法归档配置: $conf_file"; return 1; }
+
     if [[ -e "$backup" ]]; then
         [[ -f "$backup" && ! -L "$backup" ]] || { error "原配置备份异常: $backup"; return 1; }
         mv -f -- "$backup" "$conf_file" || { error "恢复原配置失败: $conf_file"; return 1; }
-        ok "已恢复原有配置: $conf_file"
+        ok "已恢复原有配置: ${conf_file}（脚本配置归档: ${removed_archive}）"
     else
         rm -f -- "$conf_file" || { error "删除失败: $conf_file"; return 1; }
-        ok "已删除: $conf_file"
+        ok "已删除: ${conf_file}（归档: ${removed_archive}）"
     fi
 }
 
@@ -420,183 +312,346 @@ uninstall_optimizations() {
     return 0
 }
 
-# ────────────────────────── 启用 BBR ──────────────────────────
+# ────────────────────────── 仅启用 BBR / fq ──────────────────────────
 enable_bbr() {
     hr
-    check_kernel_native_bbr || { warn "请先升级内核再启用 BBR"; return 1; }
+    modprobe tcp_bbr 2>/dev/null || true
+    check_bbr_available || return 1
 
-    # 每次选择此项都重新应用完整配置，包括已启用 BBR 时的其他调优参数。
-    info "正在写入并应用 BBR 与网络优化配置..."
+    local conf=/etc/sysctl.d/99-bbr.conf
+    local previous_file="" tmp_file="" old_cc old_qdisc current_cc current_qdisc
+    local legacy_archive=""
+    old_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) || old_cc=""
+    old_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null) || old_qdisc=""
 
-    prepare_managed_conf /etc/sysctl.d/99-bbr.conf bbr || return 1
-    cat > /etc/sysctl.d/99-bbr.conf <<'EOF'
+    # 老版本的同名文件还包含全局缓冲区和连接队列设置，先归档再收敛为两项。
+    if is_managed_conf "$conf" bbr && grep -q '^net.core.rmem_max' "$conf"; then
+        legacy_archive=$(mktemp "${conf}.legacy.XXXXXX") || return 1
+        cp -p -- "$conf" "$legacy_archive" || { rm -f -- "$legacy_archive"; error "无法归档旧版 BBR 配置"; return 1; }
+        ok "旧版完整配置已归档: $legacy_archive"
+    fi
+    prepare_managed_conf "$conf" bbr || return 1
+
+    if [[ -f "$conf" ]]; then
+        previous_file=$(mktemp /etc/sysctl.d/.99-bbr-previous.XXXXXX) || return 1
+        cp -p -- "$conf" "$previous_file" || { rm -f -- "$previous_file"; return 1; }
+    fi
+    tmp_file=$(mktemp /etc/sysctl.d/.99-bbr-new.XXXXXX) || {
+        [[ -n "$previous_file" ]] && rm -f -- "$previous_file"
+        return 1
+    }
+    if ! cat > "$tmp_file" <<'EOF'
 # bbr-tcp-clean: managed configuration
-# ── BBR 拥塞控制 ──
-net.core.default_qdisc         = fq
+# 仅设置本机新建 TCP 连接的拥塞控制和默认队列。
+net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
-
-# ── 发送 / 接收缓冲区 ──
-net.core.rmem_max               = 33554432
-net.core.wmem_max               = 33554432
-net.ipv4.tcp_rmem               = 4096 87380 33554432
-net.ipv4.tcp_wmem               = 4096 65536 33554432
-
-# ── 连接队列 ──
-net.core.netdev_max_backlog     = 10000
-net.ipv4.tcp_max_syn_backlog    = 8192
-net.core.somaxconn              = 8192
-
-# ── TCP 快速选项 ──
-net.ipv4.tcp_fastopen           = 3
-net.ipv4.tcp_slow_start_after_idle = 0
 EOF
-    [[ $? -eq 0 ]] || { error "写入 BBR 配置失败"; return 1; }
+    then
+        rm -f -- "$tmp_file"
+        [[ -n "$previous_file" ]] && rm -f -- "$previous_file"
+        error "写入 BBR 配置失败"
+        return 1
+    fi
+    chmod 644 "$tmp_file" || { rm -f -- "$tmp_file"; return 1; }
+    if ! mv -f -- "$tmp_file" "$conf"; then
+        rm -f -- "$tmp_file"
+        [[ -n "$previous_file" ]] && rm -f -- "$previous_file"
+        error "保存 BBR 配置失败"
+        return 1
+    fi
 
-    # 使用兼容方式逐条写入（兼容 LXC/Docker 等容器环境）
-    local apply_partial=0 current_cc current_qdisc
-    sysctl_apply_file /etc/sysctl.d/99-bbr.conf || apply_partial=1
-    current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-    current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-
-    if [[ "$current_cc" == bbr && "$current_qdisc" == fq ]]; then
-        echo ""
-        if [[ $apply_partial -eq 0 ]]; then
-            ok "BBR、fq 和配置文件中的其他参数已逐项应用"
+    if sysctl_apply_file "$conf"; then
+        current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+        current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    else
+        current_cc=""
+        current_qdisc=""
+    fi
+    if [[ "$current_cc" != bbr || "$current_qdisc" != fq ]]; then
+        if [[ -n "$previous_file" ]]; then
+            mv -f -- "$previous_file" "$conf"
         else
-            warn "BBR 和 fq 已设置，但部分调优参数未能应用，请检查上方提示"
-            return 1
+            rm -f -- "$conf"
+        fi
+        [[ -n "$old_qdisc" ]] && sysctl -w "net.core.default_qdisc=$old_qdisc" >/dev/null 2>&1 || true
+        [[ -n "$old_cc" ]] && sysctl -w "net.ipv4.tcp_congestion_control=$old_cc" >/dev/null 2>&1 || true
+        error "BBR/fq 未完整生效，已尝试恢复原配置和运行值"
+        return 1
+    fi
+    [[ -n "$previous_file" ]] && rm -f -- "$previous_file"
+    ok "BBR + fq 已启用；只写入两项内核参数"
+    info "BBR 作用于本机 TCP 发送；纯 nft 转发流量不会因此改变拥塞控制。"
+    if [[ -n "$legacy_archive" || -f /etc/sysctl.d/99-tcp-tune.conf ]]; then
+        warn "检测到旧版调优：已运行的其他参数不会因重写 BBR 文件立即恢复。"
+        warn "请用菜单 2 检查旧配置，并在合适时间重启以恢复未单独配置的参数。"
+    fi
+    info "default_qdisc 是默认值；当前网卡队列请用 tc qdisc show 检查。"
+}
+
+# ────────────────────────── 根据带宽、RTT 和内存计算 TCP 缓冲区 ──────────────────────────
+# BDP = Mbps × 125 × RTT(ms) 字节；给双向在途数据与协议开销留余量。
+# 建议值受物理内存 1/32 和 64 MiB 双重限制；保留非本脚本的更高上限。
+calc_buffer_target() {
+    local bw="$1" rtt="$2" ram_mib="$3"
+    awk -v bw="$bw" -v rtt="$rtt" -v ram="$ram_mib" 'BEGIN {
+        target = bw * 125 * rtt * 2 + 2097152
+        cap = ram * 32768
+        if (cap > 67108864) cap = 67108864
+        if (cap < 1048576) cap = 1048576
+        if (target < 4194304) target = 4194304
+        if (target > cap) target = cap
+        printf "%.0f", target
+    }'
+}
+
+buffer_ram_cap() {
+    local ram_mib="$1"
+    awk -v ram="$ram_mib" 'BEGIN {
+        cap = ram * 32768
+        if (cap > 67108864) cap = 67108864
+        if (cap < 1048576) cap = 1048576
+        printf "%.0f", cap
+    }'
+}
+
+# 连接追踪只在实时占用超过 75% 时建议调整，不凭内存档位直接写死 100 万。
+conntrack_proposal() {
+    local count="$1" current="$2" ram_mib="$3" cap proposal
+    [[ "$count" =~ ^[0-9]+$ && "$current" =~ ^[0-9]+$ && "$ram_mib" =~ ^[0-9]+$ ]] || return 1
+    (( current > 0 && count * 4 >= current * 3 )) || return 1
+    cap=$(( ram_mib * 64 ))
+    (( cap > 262144 )) && cap=262144
+    proposal=$(( current * 2 ))
+    (( proposal > cap )) && proposal=$cap
+    (( proposal > current )) || return 1
+    printf '%s' "$proposal"
+}
+
+# ────────────────────────── 自适应 TCP 调优 ──────────────────────────
+adaptive_tcp_tune() {
+    local conf=/etc/sysctl.d/99-tcp-tune.conf
+    local ram_kib ram_mib ip_forward role_choice role_name bw rtt input
+    local current_rmax current_wmax current_rrange current_wrange
+    local rmin rmid rmax wmin wmid wmax target cap new_rmax new_wmax
+    local ct_count ct_max ct_target="" existing_ct key value old_value
+    local previous_file="" runtime_backup="" tmp_file="" legacy_archive=""
+    local apply_failed=0
+
+    ram_kib=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+    [[ "$ram_kib" =~ ^[0-9]+$ ]] || { error "无法读取物理内存"; return 1; }
+    ram_mib=$(( ram_kib / 1024 ))
+    ip_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null) || ip_forward=0
+    ct_count=$(sysctl -n net.netfilter.nf_conntrack_count 2>/dev/null) || ct_count=""
+    ct_max=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null) || ct_max=""
+
+    hr
+    info "物理内存 ${ram_mib} MiB；IPv4 转发 ${ip_forward}；连接追踪 ${ct_count:-未知}/${ct_max:-未知}"
+    if is_managed_conf /etc/sysctl.d/99-bbr.conf bbr &&
+       grep -q '^net.core.rmem_max' /etc/sysctl.d/99-bbr.conf; then
+        warn "旧版 BBR 配置仍含固定 TCP 参数，建议先运行菜单 1 收敛该文件。"
+    fi
+    echo "  请选择机器用途：1) 本机代理  2) 转发 + 本机代理  3) 纯转发"
+    if [[ "$ip_forward" == 1 ]]; then input=2; else input=1; fi
+    read -rp "  用途 [默认 ${input}]: " role_choice
+    role_choice=${role_choice:-$input}
+    case "$role_choice" in
+        1) role_name=proxy ;;
+        2) role_name=mixed ;;
+        3) role_name=forward ;;
+        *) error "用途只能选 1、2 或 3"; return 1 ;;
+    esac
+
+    # 纯转发不终止 TCP 连接，不用 BDP 公式改本机 socket 缓冲区。
+    if [[ "$role_name" != forward ]]; then
+        echo "  请填实际线路能力。虚拟网卡显示的速率通常不是套餐带宽。"
+        read -rp "  本机代理线路带宽 Mbps（回车取消）: " bw
+        [[ "$bw" =~ ^[0-9]+$ ]] && (( bw >= 1 && bw <= 100000 )) || {
+            info "未提供有效带宽，未修改任何参数"
+            return 0
+        }
+        read -rp "  该线路典型 RTT 毫秒（1-2000，回车取消）: " rtt
+        [[ "$rtt" =~ ^[0-9]+$ ]] && (( rtt >= 1 && rtt <= 2000 )) || {
+            info "未提供有效 RTT，未修改任何参数"
+            return 0
+        }
+        current_rmax=$(sysctl -n net.core.rmem_max 2>/dev/null)
+        current_wmax=$(sysctl -n net.core.wmem_max 2>/dev/null)
+        current_rrange=$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null)
+        current_wrange=$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null)
+        read -r rmin rmid rmax <<< "$current_rrange"
+        read -r wmin wmid wmax <<< "$current_wrange"
+        for value in "$current_rmax" "$current_wmax" "$rmin" "$rmid" "$rmax" "$wmin" "$wmid" "$wmax"; do
+            [[ "$value" =~ ^[0-9]+$ ]] || { error "现有 TCP 缓冲区参数无法解析"; return 1; }
+        done
+        target=$(calc_buffer_target "$bw" "$rtt" "$ram_mib")
+        cap=$(buffer_ram_cap "$ram_mib")
+        new_rmax=$target
+        new_wmax=$target
+        if ! managed_setting_matches net.core.rmem_max "$current_rmax"; then
+            (( current_rmax > new_rmax )) && new_rmax=$current_rmax
+        fi
+        if ! managed_setting_matches net.core.wmem_max "$current_wmax"; then
+            (( current_wmax > new_wmax )) && new_wmax=$current_wmax
+        fi
+        if ! managed_setting_matches net.ipv4.tcp_rmem "$current_rrange"; then
+            (( rmax > new_rmax )) && new_rmax=$rmax
+        fi
+        if ! managed_setting_matches net.ipv4.tcp_wmem "$current_wrange"; then
+            (( wmax > new_wmax )) && new_wmax=$wmax
         fi
         echo ""
+        info "按 ${bw} Mbps × ${rtt} ms 估算 BDP；建议不超过内存 1/32（上限 64 MiB），保留非本脚本的更高值"
+        printf '  接收上限: %s → %s 字节；发送上限: %s → %s 字节（建议上限 %s 字节）\n' \
+            "$current_rmax" "$new_rmax" "$current_wmax" "$new_wmax" "$cap"
+    fi
+
+    if [[ ! "$ct_count" =~ ^[0-9]+$ || ! "$ct_max" =~ ^[0-9]+$ ]]; then
+        warn "无法读取连接追踪占用，跳过该项"
+    elif ct_target=$(conntrack_proposal "$ct_count" "$ct_max" "$ram_mib"); then
+        warn "连接追踪已用 ${ct_count}/${ct_max}；按内存上限可考虑提高到 ${ct_target}"
+        read -rp "  同时调整连接追踪上限？[y/N]: " input
+        [[ "$input" =~ ^[Yy]$ ]] || ct_target=""
     else
-        echo ""
-        error "BBR 或 fq 设置失败（当前拥塞控制: ${current_cc:-未读取到}，默认队列: ${current_qdisc:-未读取到}）"
-        echo ""
-        echo -e "${YELLOW}  可能原因：${PLAIN}"
-        echo "    1. LXC/OpenVZ 容器且宿主机未授予 net_admin 权限"
-        echo "    2. 内核未编译 BBR 模块（运行: modprobe tcp_bbr 验证）"
-        echo "    3. 容器平台锁定了该参数"
-        echo ""
-        echo -e "${YELLOW}  手动验证命令：${PLAIN}"
-        echo "    modprobe tcp_bbr && echo ok"
-        echo "    echo bbr > /proc/sys/net/ipv4/tcp_congestion_control"
-        echo "    sysctl net.ipv4.tcp_congestion_control"
+        info "连接追踪未达到可安全建议的扩容条件，保持现有上限"
+    fi
+    if [[ "$role_name" != forward && -z "$ct_target" && -f "$conf" ]] &&
+       grep -q '^# adaptive-tcp-tune:' "$conf"; then
+        existing_ct=$(awk -F= '$1 ~ /^[[:space:]]*net.netfilter.nf_conntrack_max[[:space:]]*$/ {
+            value=$2; gsub(/[[:space:]]/, "", value); print value
+        }' "$conf" | tail -n 1)
+        if [[ "$existing_ct" =~ ^[0-9]+$ && "$existing_ct" == "$ct_max" ]]; then
+            ct_target=$existing_ct
+            info "保留现有自适应配置中的连接追踪上限 ${ct_target}"
+        fi
+    fi
+    if [[ "$role_name" == forward && -z "$ct_target" ]]; then
+        info "纯转发不调整 TCP socket 参数，当前也不需要扩大连接追踪表"
+        if is_managed_conf "$conf" tcp; then
+            warn "现有本脚本 TCP 调优配置仍会在重启时加载，可按提示清理。"
+            remove_tcp_tune || return 1
+        fi
+        return 0
+    fi
+    warn "不会改 tcp_mem、TIME_WAIT、keepalive、SYN 重试、文件句柄等缺乏负载依据的参数。"
+    if [[ -f "$conf" ]] && grep -q '^net.ipv4.tcp_mem' "$conf"; then
+        warn "检测到旧版固定配置；替换后旧运行值仍会保留到重启。"
+    fi
+    read -rp "  确认应用以上参数？[y/N]: " input
+    [[ "$input" =~ ^[Yy]$ ]] || { info "已取消"; return 0; }
+
+    # 保留旧版脚本生成的文件，另存为非 .conf 扩展名以免再次加载。
+    if is_managed_conf "$conf" tcp; then
+        legacy_archive=$(mktemp "${conf}.before-adaptive.XXXXXX") || return 1
+        cp -p -- "$conf" "$legacy_archive" || { rm -f -- "$legacy_archive"; error "无法归档现有调优配置"; return 1; }
+    fi
+    prepare_managed_conf "$conf" tcp || return 1
+    if [[ -f "$conf" ]]; then
+        previous_file=$(mktemp /etc/sysctl.d/.99-tcp-previous.XXXXXX) || return 1
+        cp -p -- "$conf" "$previous_file" || { rm -f -- "$previous_file"; return 1; }
+    fi
+    runtime_backup=$(mktemp /etc/sysctl.d/.99-tcp-runtime.XXXXXX) || {
+        [[ -n "$previous_file" ]] && rm -f -- "$previous_file"
         return 1
+    }
+    if [[ "$role_name" != forward ]]; then
+        for key in net.core.rmem_max net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem; do
+            old_value=$(sysctl -n "$key" 2>/dev/null) || { error "无法读取 $key"; cleanup_temp_files "$runtime_backup" "$previous_file"; return 1; }
+            printf '%s=%s\n' "$key" "$old_value" >> "$runtime_backup" || { cleanup_temp_files "$runtime_backup" "$previous_file"; return 1; }
+        done
+    fi
+    if [[ -n "$ct_target" ]]; then
+        old_value=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null) || {
+            error "无法读取连接追踪上限"; cleanup_temp_files "$runtime_backup" "$previous_file"; return 1;
+        }
+        printf 'net.netfilter.nf_conntrack_max=%s\n' "$old_value" >> "$runtime_backup" || { cleanup_temp_files "$runtime_backup" "$previous_file"; return 1; }
+    fi
+    tmp_file=$(mktemp /etc/sysctl.d/.99-tcp-new.XXXXXX) || {
+        rm -f -- "$runtime_backup"
+        [[ -n "$previous_file" ]] && rm -f -- "$previous_file"
+        return 1
+    }
+    {
+        printf '# bbr-tcp-clean: managed configuration\n'
+        printf '# adaptive-tcp-tune: role=%s ram=%sMiB bw=%sMbps rtt=%sms\n' \
+            "$role_name" "$ram_mib" "${bw:-n/a}" "${rtt:-n/a}"
+        if [[ "$role_name" != forward ]]; then
+            printf 'net.core.rmem_max = %s\n' "$new_rmax"
+            printf 'net.core.wmem_max = %s\n' "$new_wmax"
+            printf 'net.ipv4.tcp_rmem = %s %s %s\n' "$rmin" "$rmid" "$new_rmax"
+            printf 'net.ipv4.tcp_wmem = %s %s %s\n' "$wmin" "$wmid" "$new_wmax"
+        fi
+        if [[ -n "$ct_target" ]]; then
+            printf 'net.netfilter.nf_conntrack_max = %s\n' "$ct_target"
+        fi
+    } > "$tmp_file" || { error "生成调优配置失败"; cleanup_temp_files "$tmp_file" "$runtime_backup" "$previous_file"; return 1; }
+    chmod 644 "$tmp_file" || { cleanup_temp_files "$tmp_file" "$runtime_backup" "$previous_file"; return 1; }
+    mv -f -- "$tmp_file" "$conf" || { error "保存调优配置失败"; cleanup_temp_files "$tmp_file" "$runtime_backup" "$previous_file"; return 1; }
+
+    sysctl_apply_file "$conf" || apply_failed=1
+    if (( apply_failed )); then
+        if [[ -n "$previous_file" ]]; then
+            mv -f -- "$previous_file" "$conf" || warn "原配置恢复失败，备份仍在: $previous_file"
+        else
+            rm -f -- "$conf" || warn "无法删除未生效的配置: $conf"
+        fi
+        while IFS='=' read -r key value; do
+            [[ -n "$key" ]] && sysctl -w "${key}=${value}" >/dev/null 2>&1 || true
+        done < "$runtime_backup"
+        cleanup_temp_files "$runtime_backup"
+        error "参数未完整应用，已尝试恢复原配置及运行值"
+        return 1
+    fi
+    cleanup_temp_files "$runtime_backup" "$previous_file"
+    ok "自适应 TCP 调优已应用: $conf"
+    if [[ -f /etc/security/limits.conf ]] &&
+       grep -Fxq '# tcp-tune: 提升文件描述符限制' /etc/security/limits.conf; then
+        remove_limits_block || warn "旧版 nofile 配置未能自动移除"
+    fi
+    if [[ -n "$legacy_archive" ]]; then
+        info "旧配置归档: $legacy_archive"
+        warn "旧版多余参数的运行值需在合适时间重启后恢复。"
     fi
 }
 
-# ────────────────────────── TCP 深度调优 ──────────────────────────
-tcp_tune() {
-    hr
-    info "正在应用 TCP 深度调优..."
-    echo ""
-    echo -e "${YELLOW}  本操作将优化以下参数：${PLAIN}"
-    echo "    • TIME_WAIT 连接回收与复用"
-    echo "    • TCP 连接保活 (keepalive)"
-    echo "    • MTU 探测 & PMTU"
-    echo "    • 本地端口范围扩展"
-    echo "    • SYN Cookie 防 SYN Flood"
-    echo "    • 连接追踪表 (nf_conntrack)"
-    echo "    • 文件描述符上限"
-    echo ""
-    read -rp "  确认写入? [y/N]: " confirm_tune
-    [[ ! "$confirm_tune" =~ ^[Yy]$ ]] && { warn "已取消"; return; }
-
-    prepare_managed_conf /etc/sysctl.d/99-tcp-tune.conf tcp || return 1
-    cat > /etc/sysctl.d/99-tcp-tune.conf <<'EOF'
-# bbr-tcp-clean: managed configuration
-# ════════════════════════════════════════════
-#   TCP 深度调优
-# ════════════════════════════════════════════
-
-# ── TIME_WAIT ──────────────────────────────
-# 加快 TIME_WAIT 回收（仅在 NAT 环境关闭）
-net.ipv4.tcp_tw_reuse           = 1
-# TIME_WAIT 最大数量，超出直接丢弃
-net.ipv4.tcp_max_tw_buckets     = 20000
-
-# ── 连接保活 ───────────────────────────────
-# 空闲 60s 后开始发送 keepalive 探测包
-net.ipv4.tcp_keepalive_time     = 60
-# 探测间隔 10s
-net.ipv4.tcp_keepalive_intvl    = 10
-# 最多探测 6 次无响应则断开
-net.ipv4.tcp_keepalive_probes   = 6
-
-# ── SYN 握手 ───────────────────────────────
-# SYN Cookie 防 SYN Flood
-net.ipv4.tcp_syncookies         = 1
-# SYN 重试次数
-net.ipv4.tcp_syn_retries        = 3
-net.ipv4.tcp_synack_retries     = 3
-# SYN 等待队列
-net.ipv4.tcp_max_syn_backlog    = 8192
-net.core.somaxconn              = 8192
-
-# ── 端口范围 ───────────────────────────────
-net.ipv4.ip_local_port_range    = 1024 65535
-
-# ── MTU 探测（推荐开启，减少分片）──────────
-net.ipv4.tcp_mtu_probing        = 1
-
-# ── 内存与缓冲区 ───────────────────────────
-net.core.rmem_default           = 262144
-net.core.wmem_default           = 262144
-net.core.rmem_max               = 33554432
-net.core.wmem_max               = 33554432
-net.ipv4.tcp_rmem               = 4096 87380 33554432
-net.ipv4.tcp_wmem               = 4096 65536 33554432
-net.ipv4.tcp_mem                = 786432 1048576 26777216
-
-# ── 连接队列/网卡接收队列 ──────────────────
-net.core.netdev_max_backlog     = 10000
-
-# ── TCP 选项 ───────────────────────────────
-# 启用 TCP Fast Open
-net.ipv4.tcp_fastopen           = 3
-# 关闭空闲后慢启动（提升长肥管道性能）
-net.ipv4.tcp_slow_start_after_idle = 0
-# 选择性确认（提升丢包恢复效率）
-net.ipv4.tcp_sack               = 1
-# 时间戳（配合 tw_reuse 使用）
-net.ipv4.tcp_timestamps         = 1
-# 窗口扩展（大带宽必备）
-net.ipv4.tcp_window_scaling     = 1
-# 有序 ACK
-net.ipv4.tcp_no_metrics_save    = 1
-
-# ── 连接追踪表（如有 nf_conntrack 模块）──────
-net.netfilter.nf_conntrack_max              = 1000000
-net.netfilter.nf_conntrack_tcp_timeout_established = 7200
-
-# ── 文件描述符 ─────────────────────────────
-fs.file-max                     = 1000000
-EOF
-    [[ $? -eq 0 ]] || { error "写入 TCP 调优配置失败"; return 1; }
-
-    # 使用兼容方式逐条写入（自动跳过不支持的参数）
-    local apply_partial=0
-    sysctl_apply_file /etc/sysctl.d/99-tcp-tune.conf || apply_partial=1
-
-    # 提升系统文件描述符限制（持久化）
-    if ! grep -q "# tcp-tune" /etc/security/limits.conf 2>/dev/null; then
-        cat >> /etc/security/limits.conf <<'EOF'
-
-# tcp-tune: 提升文件描述符限制
-* soft nofile 1000000
-* hard nofile 1000000
-root soft nofile 1000000
-root hard nofile 1000000
-EOF
+# ────────────────────────── 清理旧版 TCP 调优 ──────────────────────────
+remove_tcp_tune() {
+    local conf=/etc/sysctl.d/99-tcp-tune.conf
+    if [[ ! -e "$conf" && ! -L "$conf" ]]; then
+        info "未发现 TCP 调优配置"
+        return 0
     fi
-
-    echo ""
-    if [[ $apply_partial -eq 0 ]]; then
-        ok "TCP 调优配置已写入并应用"
-    else
-        warn "TCP 调优配置已写入，但部分参数未能应用，请检查上方提示"
+    if ! is_managed_conf "$conf" tcp; then
+        warn "配置不是本脚本生成的，已保留: $conf"
         return 1
     fi
-    echo ""
+    warn "移除配置后，已运行的参数要在重启后才会按系统默认值恢复。"
+    read -rp "  确认移除本脚本的 TCP 调优？[y/N]: " input
+    [[ "$input" =~ ^[Yy]$ ]] || return 0
+    remove_managed_conf "$conf" tcp || return 1
+    if [[ -f /etc/security/limits.conf ]] &&
+       grep -Fxq '# tcp-tune: 提升文件描述符限制' /etc/security/limits.conf; then
+        remove_limits_block || return 1
+    fi
+    ok "TCP 调优配置已移除，BBR 配置保留"
+    warn "请在合适时间重启，再核对实际参数。"
+}
+
+tcp_tune() {
+    hr
+    echo "  1) 按机器与线路参数调优 TCP"
+    echo "  2) 查看当前 TCP / 连接追踪状态"
+    echo "  3) 移除本脚本的 TCP 调优配置"
+    echo "  0) 返回"
+    read -rp "  请选择 [0-3]: " choice
+    case "$choice" in
+        1) adaptive_tcp_tune ;;
+        2) echo "  TCP 内存上限: $(tcp_memory_summary)";
+           sysctl net.core.rmem_max net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
+               net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max 2>/dev/null || true ;;
+        3) remove_tcp_tune ;;
+        0) return 0 ;;
+        *) error "无效选项"; return 1 ;;
+    esac
 }
 
 # ────────────────────────── Ubuntu/Debian 升级内核 ──────────────────────────
@@ -617,14 +672,8 @@ upgrade_kernel_debian() {
 
     info "使用官方镜像源更新软件包列表..."
 
-    # 恢复/使用官方源（海外 VPS 直连官方源更可靠）
-    if [[ "$OS" == "ubuntu" ]]; then
-        sed -i 's|https\?://mirrors\.[a-z0-9.]*\.[a-z]*/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list 2>/dev/null
-    elif [[ "$OS" == "debian" ]]; then
-        sed -i 's|https\?://mirrors\.[a-z0-9.]*\.[a-z]*/debian|http://deb.debian.org/debian|g' /etc/apt/sources.list 2>/dev/null
-    fi
-
-    apt-get update -qq
+    # 尊重管理员已有的软件源，不为启用 BBR 改写系统镜像地址。
+    apt-get update -qq || { error "软件源更新失败，内核未升级"; return 1; }
 
     local DPKG_ARCH
     DPKG_ARCH=$(dpkg --print-architecture)
@@ -691,8 +740,6 @@ upgrade_kernel_centos() {
         return 0
     fi
 
-    fixCentOSRepo
-
     if [[ "$VER" == "7" ]]; then
         grep -q "^timeout=" /etc/yum.conf || echo "timeout=60" >> /etc/yum.conf
         grep -q "^retries=" /etc/yum.conf || echo "retries=3"  >> /etc/yum.conf
@@ -742,19 +789,25 @@ remove_old_kernels() {
     info "检测已安装内核..."
 
     if [[ "$OS" =~ centos|rhel ]]; then
-        local installed_kernels kernel_count old_kernels
+        local installed_kernels kernel_count old_kernels current_package
         installed_kernels=$(rpm -qa | grep '^kernel-[0-9]' | sort -V)
-        kernel_count=$(echo "$installed_kernels" | wc -l)
+        kernel_count=$(printf '%s\n' "$installed_kernels" | grep -c .)
+        current_package=$(rpm -qf "/boot/vmlinuz-$(uname -r)" 2>/dev/null) || current_package=""
 
         if [[ $kernel_count -gt 2 ]]; then
+            old_kernels=$(printf '%s\n' "$installed_kernels" | head -n -2)
+            [[ -n "$current_package" ]] && old_kernels=$(printf '%s\n' "$old_kernels" | grep -vxF "$current_package")
+            if [[ -z "$old_kernels" ]]; then
+                ok "已保留正在运行及最新的内核，无需清理"
+                return 0
+            fi
             echo ""
-            warn "发现 ${kernel_count} 个内核，将保留最新 2 个，以下内核将被删除："
-            echo "$installed_kernels" | head -n -2 | sed 's/^/    /'
+            warn "发现 ${kernel_count} 个内核，将保留正在运行和最新 2 个，以下内核将被删除："
+            printf '%s\n' "$old_kernels" | sed 's/^/    /'
             echo ""
             read -rp "  确认删除? [y/N]: " confirm_remove
             if [[ "$confirm_remove" =~ ^[Yy]$ ]]; then
-                old_kernels=$(echo "$installed_kernels" | head -n -2)
-                [[ -n "$old_kernels" ]] && echo "$old_kernels" | xargs yum remove -y -q
+                printf '%s\n' "$old_kernels" | xargs -r yum remove -y -q || return 1
                 ok "旧内核清理完成"
             else
                 warn "已取消"
@@ -764,24 +817,32 @@ remove_old_kernels() {
         fi
 
     elif [[ "$OS" =~ debian|ubuntu ]]; then
-        local current_kernel installed_kernels
+        local current_kernel installed_kernels keep_latest old_kernels kernel
         current_kernel=$(uname -r)
-        installed_kernels=$(dpkg -l | grep 'linux-image-[0-9]' | awk '{print $2}')
+        installed_kernels=$(dpkg -l | awk '$1 == "ii" && $2 ~ /^linux-image-[0-9]/{print $2}' | sort -V)
+        keep_latest=$(printf '%s\n' "$installed_kernels" | grep . | tail -n 2)
+        old_kernels=""
+        for kernel in $installed_kernels; do
+            [[ "$kernel" == "linux-image-$current_kernel" ]] && continue
+            printf '%s\n' "$keep_latest" | grep -Fxq "$kernel" && continue
+            old_kernels+="${kernel}"$'\n'
+        done
 
         echo ""
         info "当前运行内核: ${BOLD}${current_kernel}${PLAIN}"
-        info "已安装内核列表："
-        echo "$installed_kernels" | sed 's/^/    /'
+        if [[ -z "$old_kernels" ]]; then
+            ok "已保留正在运行及最新 2 个内核，无需清理"
+            return 0
+        fi
+        warn "将保留正在运行及最新 2 个内核，拟删除："
+        printf '%s' "$old_kernels" | sed 's/^/    /'
         echo ""
-        read -rp "  清理非当前内核? [y/N]: " confirm_remove
+        read -rp "  确认清理以上旧内核? [y/N]: " confirm_remove
         if [[ "$confirm_remove" =~ ^[Yy]$ ]]; then
-            for kernel in $installed_kernels; do
-                if [[ "$kernel" != *"$current_kernel"* ]]; then
-                    info "移除: $kernel"
-                    apt-get purge -y "$kernel" -qq 2>/dev/null
-                fi
+            for kernel in $old_kernels; do
+                info "移除: $kernel"
+                apt-get purge -y "$kernel" -qq || return 1
             done
-            apt-get autoremove -y -qq
             ok "旧内核清理完成"
         else
             warn "已取消"
@@ -800,9 +861,23 @@ status_line() {
     fi
 }
 
+tcp_memory_summary() {
+    local max_pages page_size ram_kib max_mib ram_mib
+    max_pages=$(sysctl -n net.ipv4.tcp_mem 2>/dev/null | awk '{print $3}')
+    page_size=$(getconf PAGESIZE 2>/dev/null) || page_size=4096
+    ram_kib=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)
+    if [[ "$max_pages" =~ ^[0-9]+$ && "$page_size" =~ ^[0-9]+$ && "$ram_kib" =~ ^[0-9]+$ ]]; then
+        max_mib=$(( max_pages * page_size / 1024 / 1024 ))
+        ram_mib=$(( ram_kib / 1024 ))
+        printf 'max %s MiB / 物理内存 %s MiB' "$max_mib" "$ram_mib"
+    else
+        printf '未知'
+    fi
+}
+
 show_status() {
     hr
-    local bbr_status bbr_color bbr_mod bbr_mod_color qdisc cc
+    local bbr_status bbr_color bbr_mod bbr_mod_color qdisc cc iface fq_count
     if check_bbr_status; then
         bbr_status="已启用"
         bbr_color="$GREEN"
@@ -834,13 +909,28 @@ show_status() {
     status_line "BBR 模块:" "● $bbr_mod" "$bbr_mod_color"
     status_line "默认队列:" "$qdisc"
     status_line "拥塞控制:" "$cc"
-
-    # TCP 调优状态
-    if [[ -f /etc/sysctl.d/99-tcp-tune.conf ]]; then
-        status_line "TCP 调优:" "● 已应用" "$GREEN"
-    else
-        status_line "TCP 调优:" "● 未应用" "$YELLOW"
+    if is_managed_conf /etc/sysctl.d/99-bbr.conf bbr &&
+       grep -q '^net.core.rmem_max' /etc/sysctl.d/99-bbr.conf; then
+        status_line "BBR 配置:" "● 旧版文件含固定 TCP 参数（菜单 1 可更新）" "$YELLOW"
     fi
+    iface=$(ip -4 route show default 2>/dev/null | awk 'NR == 1 {for (i=1; i<NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+    if [[ -n "$iface" ]] && command -v tc >/dev/null 2>&1; then
+        fq_count=$(tc qdisc show dev "$iface" 2>/dev/null | awk '$1 == "qdisc" && $2 == "fq" {n++} END {print n+0}')
+        status_line "当前网卡:" "${iface}（fq 队列 ${fq_count} 个）"
+    fi
+
+    # 仅按文件存在不能证明每个参数都已应用。
+    if [[ -f /etc/sysctl.d/99-tcp-tune.conf ]]; then
+        if grep -q '^# adaptive-tcp-tune:' /etc/sysctl.d/99-tcp-tune.conf; then
+            status_line "TCP 调优:" "● 自适应配置已保存（菜单 2 可核对运行值）" "$GREEN"
+        else
+            status_line "TCP 调优:" "● 旧版配置仍在，菜单 2 可检查" "$YELLOW"
+        fi
+    else
+        status_line "TCP 调优:" "● 未发现配置文件" "$YELLOW"
+    fi
+    status_line "TCP 内存:" "$(tcp_memory_summary)"
+    status_line "连接追踪:" "$(sysctl -n net.netfilter.nf_conntrack_count 2>/dev/null || echo 未知) / $(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 未知)"
     hr
 }
 
@@ -853,7 +943,7 @@ show_menu() {
     echo -e "  ${BOLD}请选择操作：${PLAIN}"
     echo ""
     echo -e "  ${GREEN}1.${PLAIN}  安装 / 启用 BBR"
-    echo -e "  ${GREEN}2.${PLAIN}  TCP 深度调优"
+    echo -e "  ${GREEN}2.${PLAIN}  自适应 TCP 调优 / 检查 / 清理"
     echo -e "  ${GREEN}3.${PLAIN}  升级内核（Ubuntu / Debian）"
     echo -e "  ${GREEN}4.${PLAIN}  升级内核（CentOS 7）"
     echo -e "  ${GREEN}5.${PLAIN}  清理旧内核"
@@ -868,11 +958,7 @@ show_menu() {
 
     case $choice in
         1)
-            if check_kernel_native_bbr 2>/dev/null; then
-                enable_bbr
-            else
-                warn "当前内核不支持 BBR，请先选 3 或 4 升级内核"
-            fi
+            enable_bbr
             ;;
         2)
             tcp_tune
@@ -880,9 +966,10 @@ show_menu() {
         3)
             if [[ "$OS" =~ debian|ubuntu ]]; then
                 check_boot_space
-                upgrade_kernel_debian
-                read -rp "  是否现在重启? [y/N]: " reboot_now
-                [[ "$reboot_now" =~ ^[Yy]$ ]] && reboot
+                if upgrade_kernel_debian; then
+                    read -rp "  是否现在重启? [y/N]: " reboot_now
+                    [[ "$reboot_now" =~ ^[Yy]$ ]] && reboot
+                fi
             else
                 error "此选项仅适用于 Ubuntu / Debian"
             fi
@@ -890,9 +977,10 @@ show_menu() {
         4)
             if [[ "$OS" =~ centos|rhel ]]; then
                 check_boot_space
-                upgrade_kernel_centos
-                read -rp "  是否现在重启? [y/N]: " reboot_now
-                [[ "$reboot_now" =~ ^[Yy]$ ]] && reboot
+                if upgrade_kernel_centos; then
+                    read -rp "  是否现在重启? [y/N]: " reboot_now
+                    [[ "$reboot_now" =~ ^[Yy]$ ]] && reboot
+                fi
             else
                 error "此选项仅适用于 CentOS / RHEL"
             fi
@@ -923,33 +1011,11 @@ show_menu() {
 }
 
 # ════════════════════════════════════════════
-#   入口：预检查 → 智能判断 → 主菜单
+#   入口
 # ════════════════════════════════════════════
 if [[ "${1:-}" == "--uninstall" ]]; then
     uninstall_optimizations
     exit $?
-fi
-
-clear
-banner
-
-echo -e "${BLUE}  ◆ 执行环境预检查...${PLAIN}"
-echo ""
-
-check_dependencies
-check_virt
-fixCentOSRepo
-
-echo ""
-ok "预检查完成！"
-echo ""
-sleep 1
-
-# 智能判断：BBR 已启用且内核达标时，直接展示状态
-if check_bbr_status && check_kernel_native_bbr >/dev/null 2>&1; then
-    show_status
-    echo -e "${GREEN}  ✅  系统状态良好，BBR 已启用，可选择进一步 TCP 调优（选项 2）${PLAIN}"
-    echo ""
 fi
 
 show_menu
