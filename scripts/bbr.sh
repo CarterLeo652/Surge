@@ -5,7 +5,7 @@ export PATH
 #=================================================
 #   System  : CentOS 6/7, Debian 8+, Ubuntu 16+
 #   Desc    : BBR一键加速 + TCP深度调优
-#   Version : 2.0.8
+#   Version : 2.0.9
 #=================================================
 
 # ────────────────────────── 颜色定义 ──────────────────────────
@@ -17,7 +17,7 @@ CYAN='\033[0;96m'
 BOLD='\033[1m'
 PLAIN='\033[0m'
 
-sh_ver="2.0.8"
+sh_ver="2.0.9"
 
 # ────────────────────────── 通用工具函数 ──────────────────────────
 info()    { echo -e "${BLUE}[INFO]${PLAIN}  $*"; }
@@ -870,16 +870,16 @@ show_status() {
     status_line "操作系统:" "$OS $VER"
     status_line "系统架构:" "$ARCH"
     status_line "内核版本:" "$(uname -r)"
-    status_line "BBR 默认:" "$bbr_status" "$bbr_color"
-    status_line "BBR 模块:" "$bbr_mod" "$bbr_mod_color"
+    status_line "BBR 默认:" "● $bbr_status" "$bbr_color"
+    status_line "BBR 模块:" "● $bbr_mod" "$bbr_mod_color"
     status_line "默认队列:" "$qdisc"
     status_line "拥塞控制:" "$cc"
 
     # TCP 调优状态
     if [[ -f /etc/sysctl.d/99-tcp-tune.conf ]]; then
-        status_line "TCP 调优:" "已应用" "$GREEN"
+        status_line "TCP 调优:" "● 已应用" "$GREEN"
     else
-        status_line "TCP 调优:" "未应用" "$YELLOW"
+        status_line "TCP 调优:" "● 未应用" "$YELLOW"
     fi
     hr
 }
