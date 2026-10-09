@@ -5,7 +5,7 @@ export PATH
 #=================================================
 #   System  : CentOS 6/7, Debian 8+, Ubuntu 16+
 #   Desc    : BBR一键加速 + TCP深度调优
-#   Version : 2.0.4
+#   Version : 2.0.5
 #=================================================
 
 # ────────────────────────── 颜色定义 ──────────────────────────
@@ -17,7 +17,7 @@ CYAN='\033[0;96m'
 BOLD='\033[1m'
 PLAIN='\033[0m'
 
-sh_ver="2.0.2"
+sh_ver="2.0.5"
 
 # ────────────────────────── 通用工具函数 ──────────────────────────
 info()    { echo -e "${BLUE}[INFO]${PLAIN}  $*"; }
@@ -45,7 +45,7 @@ banner() {
 [[ $EUID -ne 0 ]] && die "请使用 root 用户运行此脚本"
 
 # ────────────────────────── curl 自举安装 ──────────────────────────
-if ! command -v curl &>/dev/null; then
+if [[ "${1:-}" != "--uninstall" ]] && ! command -v curl &>/dev/null; then
     warn "未检测到 curl，正在自动安装..."
     if command -v apt-get &>/dev/null; then
         apt-get update -qq && apt-get install -y curl -qq
@@ -319,6 +319,147 @@ sysctl_apply_file() {
     return 0
 }
 
+# ────────────────────────── 优化配置归属与备份 ──────────────────────────
+is_managed_conf() {
+    local conf_file="$1" kind="$2"
+    [[ -f "$conf_file" && ! -L "$conf_file" ]] || return 1
+
+    if grep -Fxq '# bbr-tcp-clean: managed configuration' "$conf_file"; then
+        return 0
+    fi
+
+    # 兼容旧版脚本生成的配置文件。
+    case "$kind" in
+        bbr)
+            grep -Fxq '# ── BBR 拥塞控制 ──' "$conf_file" &&
+            grep -Eq '^[[:space:]]*net\.ipv4\.tcp_congestion_control[[:space:]]*=[[:space:]]*bbr[[:space:]]*$' "$conf_file"
+            ;;
+        tcp)
+            grep -Fxq '# ── TIME_WAIT ──────────────────────────────' "$conf_file" &&
+            grep -Eq '^[[:space:]]*net\.ipv4\.tcp_tw_reuse[[:space:]]*=[[:space:]]*1[[:space:]]*$' "$conf_file"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+prepare_managed_conf() {
+    local conf_file="$1" kind="$2" backup="${1}.bbr-tcp-original"
+    [[ -e "$conf_file" || -L "$conf_file" ]] || return 0
+    [[ ! -L "$conf_file" ]] || { error "配置文件是符号链接，拒绝覆盖: $conf_file"; return 1; }
+    is_managed_conf "$conf_file" "$kind" && return 0
+    [[ ! -e "$backup" ]] || { error "备份文件已存在，拒绝覆盖: $backup"; return 1; }
+    cp -p -- "$conf_file" "$backup" || { error "备份失败: $conf_file"; return 1; }
+    ok "已备份原有配置: $backup"
+}
+
+remove_managed_conf() {
+    local conf_file="$1" kind="$2" backup="${1}.bbr-tcp-original"
+    if ! is_managed_conf "$conf_file" "$kind"; then
+        warn "文件内容与本脚本生成的配置不匹配，已保留: $conf_file"
+        return 1
+    fi
+
+    if [[ -e "$backup" ]]; then
+        [[ -f "$backup" && ! -L "$backup" ]] || { error "原配置备份异常: $backup"; return 1; }
+        mv -f -- "$backup" "$conf_file" || { error "恢复原配置失败: $conf_file"; return 1; }
+        ok "已恢复原有配置: $conf_file"
+    else
+        rm -f -- "$conf_file" || { error "删除失败: $conf_file"; return 1; }
+        ok "已删除: $conf_file"
+    fi
+}
+
+remove_limits_block() {
+    local limits_file=/etc/security/limits.conf tmp_file
+    tmp_file=$(mktemp /etc/security/.limits.conf.XXXXXX) || { error "无法创建临时文件"; return 1; }
+
+    # 只删除本脚本添加的完整五行，保留用户自己的 nofile 设置。
+    if ! awk '
+        { lines[NR] = $0 }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (lines[i] == "# tcp-tune: 提升文件描述符限制" &&
+                    lines[i+1] == "* soft nofile 1000000" &&
+                    lines[i+2] == "* hard nofile 1000000" &&
+                    lines[i+3] == "root soft nofile 1000000" &&
+                    lines[i+4] == "root hard nofile 1000000") {
+                    i += 4
+                    continue
+                }
+                print lines[i]
+            }
+        }
+    ' "$limits_file" > "$tmp_file"; then
+        rm -f -- "$tmp_file"
+        error "读取 limits.conf 失败"
+        return 1
+    fi
+
+    if cmp -s "$limits_file" "$tmp_file"; then
+        rm -f -- "$tmp_file"
+        warn "limits.conf 中的优化条目已变动，未自动删除"
+        return 1
+    fi
+
+    if ! cat "$tmp_file" > "$limits_file"; then
+        rm -f -- "$tmp_file"
+        error "写入 limits.conf 失败"
+        return 1
+    fi
+    rm -f -- "$tmp_file"
+    ok "已删除 limits.conf 中的文件描述符优化条目"
+}
+
+# ────────────────────────── 一键卸载优化配置 ──────────────────────────
+uninstall_optimizations() {
+    hr
+    echo "  将移除本脚本写入的 BBR、TCP 和文件描述符优化配置。"
+    echo "  内核升级、软件源更改和已安装软件不会自动回退。"
+    echo ""
+    read -rp "  确认卸载? [y/N]: " confirm_uninstall
+    [[ "$confirm_uninstall" =~ ^[Yy]$ ]] || { warn "已取消"; return 0; }
+
+    local removed=0 failed=0 conf_file kind
+    for kind in bbr tcp; do
+        if [[ "$kind" == bbr ]]; then
+            conf_file=/etc/sysctl.d/99-bbr.conf
+        else
+            conf_file=/etc/sysctl.d/99-tcp-tune.conf
+        fi
+        if [[ -e "$conf_file" || -L "$conf_file" ]]; then
+            if remove_managed_conf "$conf_file" "$kind"; then
+                ((removed+=1))
+            else
+                failed=1
+            fi
+        fi
+    done
+
+    if [[ -f /etc/security/limits.conf ]] &&
+       grep -Fxq '# tcp-tune: 提升文件描述符限制' /etc/security/limits.conf; then
+        if remove_limits_block; then
+            ((removed+=1))
+        else
+            failed=1
+        fi
+    fi
+
+    if [[ $failed -ne 0 ]]; then
+        error "部分配置未能卸载，请检查上方提示"
+        return 1
+    fi
+    if [[ $removed -eq 0 ]]; then
+        ok "未发现本脚本写入的优化配置"
+        return 0
+    fi
+
+    ok "优化配置已卸载（共处理 ${removed} 处）"
+    warn "运行中的内核参数需重启后才会按系统及其他配置恢复"
+    read -rp "  是否现在重启? [y/N]: " reboot_now
+    [[ "$reboot_now" =~ ^[Yy]$ ]] && reboot
+    return 0
+}
+
 # ────────────────────────── 启用 BBR ──────────────────────────
 enable_bbr() {
     hr
@@ -331,7 +472,9 @@ enable_bbr() {
 
     info "正在写入 BBR 配置..."
 
+    prepare_managed_conf /etc/sysctl.d/99-bbr.conf bbr || return 1
     cat > /etc/sysctl.d/99-bbr.conf <<'EOF'
+# bbr-tcp-clean: managed configuration
 # ── BBR 拥塞控制 ──
 net.core.default_qdisc         = fq
 net.ipv4.tcp_congestion_control = bbr
@@ -399,7 +542,9 @@ tcp_tune() {
     read -rp "  确认写入? [y/N]: " confirm_tune
     [[ ! "$confirm_tune" =~ ^[Yy]$ ]] && { warn "已取消"; return; }
 
+    prepare_managed_conf /etc/sysctl.d/99-tcp-tune.conf tcp || return 1
     cat > /etc/sysctl.d/99-tcp-tune.conf <<'EOF'
+# bbr-tcp-clean: managed configuration
 # ════════════════════════════════════════════
 #   TCP 深度调优
 # ════════════════════════════════════════════
@@ -731,11 +876,12 @@ show_menu() {
     echo -e "  ${GREEN}4.${PLAIN}  升级内核（CentOS 7）"
     echo -e "  ${GREEN}5.${PLAIN}  清理旧内核                    ${YELLOW}← 释放 /boot 空间${PLAIN}"
     echo -e "  ${GREEN}6.${PLAIN}  查看当前系统状态"
+    echo -e "  ${GREEN}7.${PLAIN}  一键卸载优化配置"
     echo ""
     echo -e "  ${GREEN}0.${PLAIN}  退出"
     echo ""
     hr
-    read -rp "  请输入选项 [0-6]: " choice
+    read -rp "  请输入选项 [0-7]: " choice
     echo ""
 
     case $choice in
@@ -775,13 +921,16 @@ show_menu() {
         6)
             show_status
             ;;
+        7)
+            uninstall_optimizations
+            ;;
         0)
             echo -e "${GREEN}  感谢使用 BBR 脚本，再见！${PLAIN}"
             echo ""
             exit 0
             ;;
         *)
-            error "无效选项，请输入 0-6"
+            error "无效选项，请输入 0-7"
             ;;
     esac
 
@@ -794,6 +943,11 @@ show_menu() {
 # ════════════════════════════════════════════
 #   入口：预检查 → 智能判断 → 主菜单
 # ════════════════════════════════════════════
+if [[ "${1:-}" == "--uninstall" ]]; then
+    uninstall_optimizations
+    exit $?
+fi
+
 clear
 banner
 
