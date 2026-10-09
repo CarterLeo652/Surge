@@ -5,7 +5,7 @@ export PATH
 #=================================================
 #   System  : CentOS 6/7, Debian 8+, Ubuntu 16+
 #   Desc    : BBR一键加速 + TCP深度调优
-#   Version : 2.0.9
+#   Version : 2.0.10
 #=================================================
 
 # ────────────────────────── 颜色定义 ──────────────────────────
@@ -17,7 +17,7 @@ CYAN='\033[0;96m'
 BOLD='\033[1m'
 PLAIN='\033[0m'
 
-sh_ver="2.0.9"
+sh_ver="2.0.10"
 
 # ────────────────────────── 通用工具函数 ──────────────────────────
 info()    { echo -e "${BLUE}[INFO]${PLAIN}  $*"; }
@@ -44,18 +44,6 @@ banner() {
 # ────────────────────────── Root 权限检查 ──────────────────────────
 [[ $EUID -ne 0 ]] && die "请使用 root 用户运行此脚本"
 
-# ────────────────────────── curl 自举安装 ──────────────────────────
-if [[ "${1:-}" != "--uninstall" ]] && ! command -v curl &>/dev/null; then
-    warn "未检测到 curl，正在自动安装..."
-    if command -v apt-get &>/dev/null; then
-        apt-get update -qq && apt-get install -y curl -qq
-    elif command -v yum &>/dev/null; then
-        yum install -y curl -q
-    fi
-    command -v curl &>/dev/null || die "curl 安装失败，请手动安装后重试"
-    ok "curl 安装完成"
-fi
-
 # ────────────────────────── 系统信息检测 ──────────────────────────
 if [[ -f /etc/os-release ]]; then
     . /etc/os-release
@@ -78,10 +66,10 @@ check_dependencies() {
 
     if [[ "$OS" =~ centos|rhel|fedora ]]; then
         PKG_INSTALL="yum install -y -q"
-        DEPS="ca-certificates wget curl"
+        DEPS="ca-certificates"
     elif [[ "$OS" =~ debian|ubuntu ]]; then
         PKG_INSTALL="apt-get install -y -qq"
-        DEPS="ca-certificates wget curl"
+        DEPS="ca-certificates"
     else
         warn "未知包管理器，跳过依赖检查"
         return 0
@@ -160,34 +148,6 @@ check_boot_space() {
             ok "/boot 空间充足（可用: ${boot_available}MB）"
         fi
     fi
-}
-
-# ────────────────────────── 网络连通性检查 ──────────────────────────
-check_network() {
-    hr
-    info "检查网络连接..."
-
-    local test_hosts=(
-        "https://www.google.com"
-        "https://cloudflare.com"
-        "https://github.com"
-        "https://1.1.1.1"
-    )
-
-    for host in "${test_hosts[@]}"; do
-        if curl -s --connect-timeout 5 --max-time 8 "$host" > /dev/null 2>&1; then
-            ok "网络连接正常（${host}）"
-            return 0
-        fi
-    done
-
-    if ping -c 2 -W 3 8.8.8.8 > /dev/null 2>&1; then
-        warn "IP 可达但 HTTPS 访问受限，请检查防火墙/DNS"
-        return 0
-    fi
-
-    error "网络连接失败，请检查网络配置"
-    return 1
 }
 
 # ────────────────────────── CentOS EOL 源修复（改用官方 Vault）──────────────────────────
@@ -977,7 +937,6 @@ echo -e "${BLUE}  ◆ 执行环境预检查...${PLAIN}"
 echo ""
 
 check_dependencies
-check_network
 check_virt
 fixCentOSRepo
 
