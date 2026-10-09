@@ -5,7 +5,7 @@ export PATH
 #=================================================
 #   System  : CentOS 6/7, Debian 8+, Ubuntu 16+
 #   Desc    : BBR一键加速 + TCP深度调优
-#   Version : 2.0.5
+#   Version : 2.0.8
 #=================================================
 
 # ────────────────────────── 颜色定义 ──────────────────────────
@@ -17,7 +17,7 @@ CYAN='\033[0;96m'
 BOLD='\033[1m'
 PLAIN='\033[0m'
 
-sh_ver="2.0.5"
+sh_ver="2.0.8"
 
 # ────────────────────────── 通用工具函数 ──────────────────────────
 info()    { echo -e "${BLUE}[INFO]${PLAIN}  $*"; }
@@ -34,8 +34,8 @@ banner() {
     echo -e "${CYAN}"
     echo "  ╔══════════════════════════════════════════════════════╗"
     echo "  ║                                                      ║"
-    echo "  ║     BBR 一键加速 + TCP 深度调优  v${sh_ver}           ║"
-    echo "  ║     适用于 CentOS 6/7 · Debian 8+ · Ubuntu 16+      ║"
+    printf '  ║     BBR 一键加速 + TCP 深度调优  v%s%*s║\n' "$sh_ver" "$((19 - ${#sh_ver}))" ''
+    echo "  ║     适用于 CentOS 6/7 · Debian 8+ · Ubuntu 16+       ║"
     echo "  ║                                                      ║"
     echo "  ╚══════════════════════════════════════════════════════╝"
     echo -e "${PLAIN}"
@@ -262,7 +262,8 @@ EOF
     ok "CentOS ${VER} Vault 源配置完成（使用官方 vault.centos.org）"
 }
 
-# ────────────────────────── BBR 状态检测 ──────────────────────────
+# ────────────────────────── 系统默认拥塞控制检测 ──────────────────────────
+# 此处判断新建 TCP 连接的默认算法，不代表每一条现有连接都在使用 BBR。
 check_bbr_status() {
     local cc
     cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
@@ -292,7 +293,6 @@ check_kernel_native_bbr() {
 # 优先用 sysctl -w 逐条写入，避免 sysctl -p 在容器内遇到不支持的参数时中途退出
 sysctl_apply_file() {
     local conf_file="$1"
-    local failed=0
     local skipped=0
 
     while IFS= read -r line; do
@@ -310,13 +310,13 @@ sysctl_apply_file() {
         local err
         err=$(sysctl -w "${key}=${value}" 2>&1)
         if [[ $? -ne 0 ]]; then
-            # 静默跳过不支持的参数（容器内常见）
-            warn "跳过不支持的参数: ${key} (${err})"
+            # 某些内核或容器不允许写入该参数，继续处理其余配置。
+            warn "参数写入失败: ${key} (${err})"
             (( skipped++ ))
         fi
     done < "$conf_file"
 
-    return 0
+    [[ $skipped -eq 0 ]]
 }
 
 # ────────────────────────── 优化配置归属与备份 ──────────────────────────
@@ -463,14 +463,10 @@ uninstall_optimizations() {
 # ────────────────────────── 启用 BBR ──────────────────────────
 enable_bbr() {
     hr
-    if check_bbr_status; then
-        ok "BBR 已处于启用状态，无需重复操作"
-        return 0
-    fi
-
     check_kernel_native_bbr || { warn "请先升级内核再启用 BBR"; return 1; }
 
-    info "正在写入 BBR 配置..."
+    # 每次选择此项都重新应用完整配置，包括已启用 BBR 时的其他调优参数。
+    info "正在写入并应用 BBR 与网络优化配置..."
 
     prepare_managed_conf /etc/sysctl.d/99-bbr.conf bbr || return 1
     cat > /etc/sysctl.d/99-bbr.conf <<'EOF'
@@ -494,23 +490,26 @@ net.core.somaxconn              = 8192
 net.ipv4.tcp_fastopen           = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 EOF
+    [[ $? -eq 0 ]] || { error "写入 BBR 配置失败"; return 1; }
 
     # 使用兼容方式逐条写入（兼容 LXC/Docker 等容器环境）
-    sysctl_apply_file /etc/sysctl.d/99-bbr.conf
+    local apply_partial=0 current_cc current_qdisc
+    sysctl_apply_file /etc/sysctl.d/99-bbr.conf || apply_partial=1
+    current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
 
-    # 兜底：强制写入最关键的两条
-    sysctl -w net.core.default_qdisc=fq 2>/dev/null || true
-    sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true
-
-    if check_bbr_status; then
+    if [[ "$current_cc" == bbr && "$current_qdisc" == fq ]]; then
         echo ""
-        echo -e "${GREEN}  ┌─────────────────────────────────────────────────┐${PLAIN}"
-        echo -e "${GREEN}  │  ✅  BBR 启用成功！网络加速已生效               │${PLAIN}"
-        echo -e "${GREEN}  └─────────────────────────────────────────────────┘${PLAIN}"
+        if [[ $apply_partial -eq 0 ]]; then
+            ok "BBR、fq 和配置文件中的其他参数已逐项应用"
+        else
+            warn "BBR 和 fq 已设置，但部分调优参数未能应用，请检查上方提示"
+            return 1
+        fi
         echo ""
     else
         echo ""
-        error "BBR 启用失败，当前环境可能不支持修改拥塞控制算法"
+        error "BBR 或 fq 设置失败（当前拥塞控制: ${current_cc:-未读取到}，默认队列: ${current_qdisc:-未读取到}）"
         echo ""
         echo -e "${YELLOW}  可能原因：${PLAIN}"
         echo "    1. LXC/OpenVZ 容器且宿主机未授予 net_admin 权限"
@@ -612,9 +611,11 @@ net.netfilter.nf_conntrack_tcp_timeout_established = 7200
 # ── 文件描述符 ─────────────────────────────
 fs.file-max                     = 1000000
 EOF
+    [[ $? -eq 0 ]] || { error "写入 TCP 调优配置失败"; return 1; }
 
     # 使用兼容方式逐条写入（自动跳过不支持的参数）
-    sysctl_apply_file /etc/sysctl.d/99-tcp-tune.conf
+    local apply_partial=0
+    sysctl_apply_file /etc/sysctl.d/99-tcp-tune.conf || apply_partial=1
 
     # 提升系统文件描述符限制（持久化）
     if ! grep -q "# tcp-tune" /etc/security/limits.conf 2>/dev/null; then
@@ -629,11 +630,12 @@ EOF
     fi
 
     echo ""
-    echo -e "${GREEN}  ┌─────────────────────────────────────────────────┐${PLAIN}"
-    echo -e "${GREEN}  │  ✅  TCP 调优配置已写入                         │${PLAIN}"
-    echo -e "${GREEN}  │     配置文件: /etc/sysctl.d/99-tcp-tune.conf    │${PLAIN}"
-    echo -e "${GREEN}  │     无需重启，参数立即生效                       │${PLAIN}"
-    echo -e "${GREEN}  └─────────────────────────────────────────────────┘${PLAIN}"
+    if [[ $apply_partial -eq 0 ]]; then
+        ok "TCP 调优配置已写入并应用"
+    else
+        warn "TCP 调优配置已写入，但部分参数未能应用，请检查上方提示"
+        return 1
+    fi
     echo ""
 }
 
@@ -828,36 +830,56 @@ remove_old_kernels() {
 }
 
 # ────────────────────────── 系统状态展示 ──────────────────────────
+status_line() {
+    local label="$1" value="$2" color="${3:-}"
+    printf "  ${CYAN}%s${PLAIN}  " "$label"
+    if [[ -n "$color" ]]; then
+        printf "${color}%s${PLAIN}\n" "$value"
+    else
+        printf '%s\n' "$value"
+    fi
+}
+
 show_status() {
     hr
-    local bbr_status bbr_mod qdisc cc
-    check_bbr_status  && bbr_status="${GREEN}✅ 已启用${PLAIN}" || bbr_status="${RED}❌ 未启用${PLAIN}"
+    local bbr_status bbr_color bbr_mod bbr_mod_color qdisc cc
+    if check_bbr_status; then
+        bbr_status="已启用"
+        bbr_color="$GREEN"
+    else
+        bbr_status="未启用"
+        bbr_color="$RED"
+    fi
     if lsmod | grep -q bbr; then
-        bbr_mod="${GREEN}✅ 已加载（模块）${PLAIN}"
+        bbr_mod="已加载（模块）"
+        bbr_mod_color="$GREEN"
     elif grep -q 'CONFIG_TCP_CONG_BBR=y' /boot/config-$(uname -r) 2>/dev/null \
       || zcat /proc/config.gz 2>/dev/null | grep -q 'CONFIG_TCP_CONG_BBR=y'; then
-        bbr_mod="${GREEN}✅ 已内置（built-in）${PLAIN}"
+        bbr_mod="已内置（built-in）"
+        bbr_mod_color="$GREEN"
     elif check_bbr_status; then
-        bbr_mod="${GREEN}✅ 运行中（内置）${PLAIN}"
+        bbr_mod="运行中（内置）"
+        bbr_mod_color="$GREEN"
     else
-        bbr_mod="${RED}❌ 未加载${PLAIN}"
+        bbr_mod="未加载"
+        bbr_mod_color="$RED"
     fi
     qdisc=$(sysctl -n net.core.default_qdisc        2>/dev/null || echo "未设置")
     cc=$(sysctl -n net.ipv4.tcp_congestion_control  2>/dev/null || echo "未设置")
 
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "操作系统:"   "$OS $VER"
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "系统架构:"   "$ARCH"
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "内核版本:"   "$(uname -r)"
-    printf "  ${CYAN}%-18s${PLAIN}${bbr_status}\n" "BBR 状态:"
-    printf "  ${CYAN}%-18s${PLAIN}${bbr_mod}\n"    "BBR 模块:"
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "队列算法:"   "$qdisc"
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "拥塞控制:"   "$cc"
+    status_line "操作系统:" "$OS $VER"
+    status_line "系统架构:" "$ARCH"
+    status_line "内核版本:" "$(uname -r)"
+    status_line "BBR 默认:" "$bbr_status" "$bbr_color"
+    status_line "BBR 模块:" "$bbr_mod" "$bbr_mod_color"
+    status_line "默认队列:" "$qdisc"
+    status_line "拥塞控制:" "$cc"
 
     # TCP 调优状态
     if [[ -f /etc/sysctl.d/99-tcp-tune.conf ]]; then
-        printf "  ${CYAN}%-18s${PLAIN} ${GREEN}✅ 已应用${PLAIN}\n" "TCP 调优:"
+        status_line "TCP 调优:" "已应用" "$GREEN"
     else
-        printf "  ${CYAN}%-18s${PLAIN} ${YELLOW}⬜ 未应用${PLAIN}\n" "TCP 调优:"
+        status_line "TCP 调优:" "未应用" "$YELLOW"
     fi
     hr
 }
@@ -870,11 +892,11 @@ show_menu() {
 
     echo -e "  ${BOLD}请选择操作：${PLAIN}"
     echo ""
-    echo -e "  ${GREEN}1.${PLAIN}  安装 / 启用 BBR              ${YELLOW}← 推荐先选此项${PLAIN}"
-    echo -e "  ${GREEN}2.${PLAIN}  TCP 深度调优                  ${YELLOW}← 进一步优化网络性能${PLAIN}"
+    echo -e "  ${GREEN}1.${PLAIN}  安装 / 启用 BBR"
+    echo -e "  ${GREEN}2.${PLAIN}  TCP 深度调优"
     echo -e "  ${GREEN}3.${PLAIN}  升级内核（Ubuntu / Debian）"
     echo -e "  ${GREEN}4.${PLAIN}  升级内核（CentOS 7）"
-    echo -e "  ${GREEN}5.${PLAIN}  清理旧内核                    ${YELLOW}← 释放 /boot 空间${PLAIN}"
+    echo -e "  ${GREEN}5.${PLAIN}  清理旧内核"
     echo -e "  ${GREEN}6.${PLAIN}  查看当前系统状态"
     echo -e "  ${GREEN}7.${PLAIN}  一键卸载优化配置"
     echo ""
