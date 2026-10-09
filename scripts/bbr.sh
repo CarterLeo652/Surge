@@ -469,10 +469,14 @@ adaptive_tcp_tune() {
             info "未提供有效带宽，未修改任何参数"
             return 0
         }
-        read -rp "  该线路典型 RTT 毫秒（1-2000，回车取消）: " rtt
+        read -rp "  该线路典型 RTT 毫秒（1-2000，回车按 100 ms 估算）: " rtt
+        if [[ -z "$rtt" ]]; then
+            rtt=100
+            info "未填写 RTT，本次按 100 ms 估算；配置预览中会显示该值。"
+        fi
         [[ "$rtt" =~ ^[0-9]+$ ]] && (( rtt >= 1 && rtt <= 2000 )) || {
-            info "未提供有效 RTT，未修改任何参数"
-            return 0
+            error "RTT 必须是 1-2000 的整数毫秒，未修改任何参数"
+            return 1
         }
         current_rmax=$(sysctl -n net.core.rmem_max 2>/dev/null)
         current_wmax=$(sysctl -n net.core.wmem_max 2>/dev/null)
