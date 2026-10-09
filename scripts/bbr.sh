@@ -6,8 +6,6 @@ export PATH
 #   System  : CentOS 6/7, Debian 8+, Ubuntu 16+
 #   Desc    : BBR一键加速 + TCP深度调优
 #   Version : 2.0.4
-#   Author  : VPS值得买
-#   测评网站    : https://vpszdm.com
 #=================================================
 
 # ────────────────────────── 颜色定义 ──────────────────────────
@@ -19,7 +17,7 @@ CYAN='\033[0;96m'
 BOLD='\033[1m'
 PLAIN='\033[0m'
 
-sh_ver="2.0.2"
+sh_ver="2.0.4"
 
 # ────────────────────────── 通用工具函数 ──────────────────────────
 info()    { echo -e "${BLUE}[INFO]${PLAIN}  $*"; }
@@ -36,10 +34,8 @@ banner() {
     echo -e "${CYAN}"
     echo "  ╔══════════════════════════════════════════════════════╗"
     echo "  ║                                                      ║"
-    echo "  ║     BBR 一键加速 + TCP 深度调优  v${sh_ver}           ║"
-    echo "  ║     适用于 CentOS 6/7 · Debian 8+ · Ubuntu 16+      ║"
-    echo "  ║                                                      ║"
-    echo "  ║     作者: VPS值得买   vpszdm.com         ║"
+    printf '  ║  BBR 一键加速 + TCP 深度调优  v%s%*s║\n' "$sh_ver" "$((22 - ${#sh_ver}))" ''
+    echo "  ║  适用于 CentOS 6/7, Debian 8+, Ubuntu 16+            ║"
     echo "  ║                                                      ║"
     echo "  ╚══════════════════════════════════════════════════════╝"
     echo -e "${PLAIN}"
@@ -47,18 +43,6 @@ banner() {
 
 # ────────────────────────── Root 权限检查 ──────────────────────────
 [[ $EUID -ne 0 ]] && die "请使用 root 用户运行此脚本"
-
-# ────────────────────────── curl 自举安装 ──────────────────────────
-if ! command -v curl &>/dev/null; then
-    warn "未检测到 curl，正在自动安装..."
-    if command -v apt-get &>/dev/null; then
-        apt-get update -qq && apt-get install -y curl -qq
-    elif command -v yum &>/dev/null; then
-        yum install -y curl -q
-    fi
-    command -v curl &>/dev/null || die "curl 安装失败，请手动安装后重试"
-    ok "curl 安装完成"
-fi
 
 # ────────────────────────── 系统信息检测 ──────────────────────────
 if [[ -f /etc/os-release ]]; then
@@ -82,10 +66,10 @@ check_dependencies() {
 
     if [[ "$OS" =~ centos|rhel|fedora ]]; then
         PKG_INSTALL="yum install -y -q"
-        DEPS="ca-certificates wget curl"
+        DEPS="ca-certificates"
     elif [[ "$OS" =~ debian|ubuntu ]]; then
         PKG_INSTALL="apt-get install -y -qq"
-        DEPS="ca-certificates wget curl"
+        DEPS="ca-certificates"
     else
         warn "未知包管理器，跳过依赖检查"
         return 0
@@ -164,34 +148,6 @@ check_boot_space() {
             ok "/boot 空间充足（可用: ${boot_available}MB）"
         fi
     fi
-}
-
-# ────────────────────────── 网络连通性检查 ──────────────────────────
-check_network() {
-    hr
-    info "检查网络连接..."
-
-    local test_hosts=(
-        "https://www.google.com"
-        "https://cloudflare.com"
-        "https://github.com"
-        "https://1.1.1.1"
-    )
-
-    for host in "${test_hosts[@]}"; do
-        if curl -s --connect-timeout 5 --max-time 8 "$host" > /dev/null 2>&1; then
-            ok "网络连接正常（${host}）"
-            return 0
-        fi
-    done
-
-    if ping -c 2 -W 3 8.8.8.8 > /dev/null 2>&1; then
-        warn "IP 可达但 HTTPS 访问受限，请检查防火墙/DNS"
-        return 0
-    fi
-
-    error "网络连接失败，请检查网络配置"
-    return 1
 }
 
 # ────────────────────────── CentOS EOL 源修复（改用官方 Vault）──────────────────────────
@@ -323,6 +279,151 @@ sysctl_apply_file() {
     return 0
 }
 
+# ────────────────────────── 配置文件备份与安全卸载 ──────────────────────────
+file_sha256() {
+    if command -v sha256sum &>/dev/null; then
+        sha256sum -- "$1" | awk '{print $1}'
+    elif command -v shasum &>/dev/null; then
+        shasum -a 256 -- "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+is_managed_conf() {
+    local conf_file="$1" kind="$2" hash
+    [[ -f "$conf_file" && ! -L "$conf_file" ]] || return 1
+    hash=$(file_sha256 "$conf_file") || return 1
+
+    # 只识别脚本生成的完整文件；文件被手工改动后不会自动删除。
+    case "$kind:$hash" in
+        bbr:623cb889cc88a96b7a37d845eb87cc17801578a7ec132e35299a4d49e308e122|\
+        bbr:e97bdec5ee1d385a3ec16e6a29b91d384a97acb2ef1eba910476ba25552fbc9a|\
+        tcp:ad84edef28ff9fcbcd1f4b8fb98f9d628fc99d008efd02443d9fc2d7a49ad316|\
+        tcp:95c922731cc8b0fadf7ea08345f8a9b4784d968a8a0c0911a4bc48be56d3da19|\
+        tcp:e159dfd95932fc00a510fc75bcd5f4b028a87e11c68fcaddf941e70757968813)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+prepare_managed_conf() {
+    local conf_file="$1" kind="$2" backup="${1}.bbr-tcp-original"
+    [[ -e "$conf_file" || -L "$conf_file" ]] || return 0
+    [[ -f "$conf_file" && ! -L "$conf_file" ]] || { error "配置文件不是普通文件，拒绝覆盖: $conf_file"; return 1; }
+    is_managed_conf "$conf_file" "$kind" && return 0
+    [[ ! -e "$backup" && ! -L "$backup" ]] || { error "备份文件已存在，拒绝覆盖: $backup"; return 1; }
+    cp -p -- "$conf_file" "$backup" || { error "备份失败: $conf_file"; return 1; }
+    ok "已备份原有配置: $backup"
+}
+
+remove_managed_conf() {
+    local conf_file="$1" kind="$2" backup="${1}.bbr-tcp-original"
+    if ! is_managed_conf "$conf_file" "$kind"; then
+        warn "文件不是本脚本生成的原样配置，已保留: $conf_file"
+        return 1
+    fi
+
+    if [[ -e "$backup" || -L "$backup" ]]; then
+        [[ -f "$backup" && ! -L "$backup" ]] || { error "原配置备份异常: $backup"; return 1; }
+        mv -f -- "$backup" "$conf_file" || { error "恢复原配置失败: $conf_file"; return 1; }
+        ok "已恢复原有配置: $conf_file"
+    else
+        rm -f -- "$conf_file" || { error "删除失败: $conf_file"; return 1; }
+        ok "已删除: $conf_file"
+    fi
+}
+
+remove_limits_block() {
+    local limits_file=/etc/security/limits.conf tmp_file
+    [[ -f "$limits_file" && ! -L "$limits_file" ]] || { error "limits.conf 不是普通文件，已保留"; return 1; }
+    tmp_file=$(mktemp /etc/security/.limits.conf.XXXXXX) || { error "无法创建临时文件"; return 1; }
+
+    if ! awk '
+        { lines[NR] = $0 }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (lines[i] == "# tcp-tune: 提升文件描述符限制" &&
+                    lines[i+1] == "* soft nofile 1000000" &&
+                    lines[i+2] == "* hard nofile 1000000" &&
+                    lines[i+3] == "root soft nofile 1000000" &&
+                    lines[i+4] == "root hard nofile 1000000") {
+                    i += 4
+                    continue
+                }
+                print lines[i]
+            }
+        }
+    ' "$limits_file" > "$tmp_file"; then
+        rm -f -- "$tmp_file"
+        error "读取 limits.conf 失败"
+        return 1
+    fi
+
+    if cmp -s "$limits_file" "$tmp_file"; then
+        rm -f -- "$tmp_file"
+        warn "limits.conf 中的优化条目已变动，未自动删除"
+        return 1
+    fi
+
+    if ! cat "$tmp_file" > "$limits_file"; then
+        rm -f -- "$tmp_file"
+        error "写入 limits.conf 失败"
+        return 1
+    fi
+    rm -f -- "$tmp_file"
+    ok "已删除 limits.conf 中的文件描述符优化条目"
+}
+
+uninstall_optimizations() {
+    hr
+    echo "  将移除本脚本写入的 BBR、TCP 和文件描述符优化配置。"
+    echo "  内核升级、软件源更改和已安装软件不会自动回退。"
+    echo ""
+    read -rp "  确认卸载? [y/N]: " confirm_uninstall
+    [[ "$confirm_uninstall" =~ ^[Yy]$ ]] || { warn "已取消"; return 0; }
+
+    local removed=0 failed=0 conf_file kind
+    for kind in bbr tcp; do
+        if [[ "$kind" == bbr ]]; then
+            conf_file=/etc/sysctl.d/99-bbr.conf
+        else
+            conf_file=/etc/sysctl.d/99-tcp-tune.conf
+        fi
+        if [[ -e "$conf_file" || -L "$conf_file" ]]; then
+            if remove_managed_conf "$conf_file" "$kind"; then
+                ((removed+=1))
+            else
+                failed=1
+            fi
+        fi
+    done
+
+    if [[ -f /etc/security/limits.conf ]] &&
+       grep -Fxq '# tcp-tune: 提升文件描述符限制' /etc/security/limits.conf; then
+        if remove_limits_block; then
+            ((removed+=1))
+        else
+            failed=1
+        fi
+    fi
+
+    if [[ $failed -ne 0 ]]; then
+        error "部分配置未能卸载，请检查上方提示"
+        return 1
+    fi
+    if [[ $removed -eq 0 ]]; then
+        ok "未发现本脚本写入的优化配置"
+        return 0
+    fi
+
+    ok "优化配置已卸载（共处理 ${removed} 处）"
+    warn "运行中的内核参数需重启后才会按系统及其他配置恢复"
+    read -rp "  是否现在重启? [y/N]: " reboot_now
+    [[ "$reboot_now" =~ ^[Yy]$ ]] && reboot
+    return 0
+}
+
 # ────────────────────────── 启用 BBR ──────────────────────────
 enable_bbr() {
     hr
@@ -335,7 +436,9 @@ enable_bbr() {
 
     info "正在写入 BBR 配置..."
 
+    prepare_managed_conf /etc/sysctl.d/99-bbr.conf bbr || return 1
     cat > /etc/sysctl.d/99-bbr.conf <<'EOF'
+# bbr-tcp-clean: managed configuration
 # ── BBR 拥塞控制 ──
 net.core.default_qdisc         = fq
 net.ipv4.tcp_congestion_control = bbr
@@ -355,6 +458,7 @@ net.core.somaxconn              = 8192
 net.ipv4.tcp_fastopen           = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 EOF
+    [[ $? -eq 0 ]] || { error "写入 BBR 配置失败"; return 1; }
 
     # 使用兼容方式逐条写入（兼容 LXC/Docker 等容器环境）
     sysctl_apply_file /etc/sysctl.d/99-bbr.conf
@@ -403,10 +507,11 @@ tcp_tune() {
     read -rp "  确认写入? [y/N]: " confirm_tune
     [[ ! "$confirm_tune" =~ ^[Yy]$ ]] && { warn "已取消"; return; }
 
+    prepare_managed_conf /etc/sysctl.d/99-tcp-tune.conf tcp || return 1
     cat > /etc/sysctl.d/99-tcp-tune.conf <<'EOF'
+# bbr-tcp-clean: managed configuration
 # ════════════════════════════════════════════
-#   TCP 深度调优 - by VPS值得买
-#   https://vpszdm.com
+#   TCP 深度调优
 # ════════════════════════════════════════════
 
 # ── TIME_WAIT ──────────────────────────────
@@ -472,6 +577,7 @@ net.netfilter.nf_conntrack_tcp_timeout_established = 7200
 # ── 文件描述符 ─────────────────────────────
 fs.file-max                     = 1000000
 EOF
+    [[ $? -eq 0 ]] || { error "写入 TCP 调优配置失败"; return 1; }
 
     # 使用兼容方式逐条写入（自动跳过不支持的参数）
     sysctl_apply_file /etc/sysctl.d/99-tcp-tune.conf
@@ -688,36 +794,51 @@ remove_old_kernels() {
 }
 
 # ────────────────────────── 系统状态展示 ──────────────────────────
+status_line() {
+    local label="$1" value="$2" color="${3:-}"
+    printf "  ${CYAN}%s${PLAIN}  ${color}%s${PLAIN}\n" "$label" "$value"
+}
+
 show_status() {
     hr
-    local bbr_status bbr_mod qdisc cc
-    check_bbr_status  && bbr_status="${GREEN}✅ 已启用${PLAIN}" || bbr_status="${RED}❌ 未启用${PLAIN}"
+    local bbr_status bbr_color bbr_mod bbr_mod_color qdisc cc
+    if check_bbr_status; then
+        bbr_status="✅ 已启用"
+        bbr_color="$GREEN"
+    else
+        bbr_status="❌ 未启用"
+        bbr_color="$RED"
+    fi
     if lsmod | grep -q bbr; then
-        bbr_mod="${GREEN}✅ 已加载（模块）${PLAIN}"
+        bbr_mod="✅ 已加载（模块）"
+        bbr_mod_color="$GREEN"
     elif grep -q 'CONFIG_TCP_CONG_BBR=y' /boot/config-$(uname -r) 2>/dev/null \
       || zcat /proc/config.gz 2>/dev/null | grep -q 'CONFIG_TCP_CONG_BBR=y'; then
-        bbr_mod="${GREEN}✅ 已内置（built-in）${PLAIN}"
+        bbr_mod="✅ 已内置（built-in）"
+        bbr_mod_color="$GREEN"
     elif check_bbr_status; then
-        bbr_mod="${GREEN}✅ 运行中（内置）${PLAIN}"
+        bbr_mod="✅ 运行中（内置）"
+        bbr_mod_color="$GREEN"
     else
-        bbr_mod="${RED}❌ 未加载${PLAIN}"
+        bbr_mod="❌ 未加载"
+        bbr_mod_color="$RED"
     fi
     qdisc=$(sysctl -n net.core.default_qdisc        2>/dev/null || echo "未设置")
     cc=$(sysctl -n net.ipv4.tcp_congestion_control  2>/dev/null || echo "未设置")
 
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "操作系统:"   "$OS $VER"
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "系统架构:"   "$ARCH"
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "内核版本:"   "$(uname -r)"
-    printf "  ${CYAN}%-18s${PLAIN}${bbr_status}\n" "BBR 状态:"
-    printf "  ${CYAN}%-18s${PLAIN}${bbr_mod}\n"    "BBR 模块:"
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "队列算法:"   "$qdisc"
-    printf "  ${CYAN}%-18s${PLAIN} %s\n"    "拥塞控制:"   "$cc"
+    status_line "操作系统:" "$OS $VER"
+    status_line "系统架构:" "$ARCH"
+    status_line "内核版本:" "$(uname -r)"
+    status_line "BBR 状态:" "$bbr_status" "$bbr_color"
+    status_line "BBR 模块:" "$bbr_mod" "$bbr_mod_color"
+    status_line "队列算法:" "$qdisc"
+    status_line "拥塞控制:" "$cc"
 
     # TCP 调优状态
     if [[ -f /etc/sysctl.d/99-tcp-tune.conf ]]; then
-        printf "  ${CYAN}%-18s${PLAIN} ${GREEN}✅ 已应用${PLAIN}\n" "TCP 调优:"
+        status_line "TCP 调优:" "✅ 已应用" "$GREEN"
     else
-        printf "  ${CYAN}%-18s${PLAIN} ${YELLOW}⬜ 未应用${PLAIN}\n" "TCP 调优:"
+        status_line "TCP 调优:" "⬜ 未应用" "$YELLOW"
     fi
     hr
 }
@@ -736,11 +857,12 @@ show_menu() {
     echo -e "  ${GREEN}4.${PLAIN}  升级内核（CentOS 7）"
     echo -e "  ${GREEN}5.${PLAIN}  清理旧内核                    ${YELLOW}← 释放 /boot 空间${PLAIN}"
     echo -e "  ${GREEN}6.${PLAIN}  查看当前系统状态"
+    echo -e "  ${GREEN}7.${PLAIN}  一键卸载优化配置"
     echo ""
     echo -e "  ${GREEN}0.${PLAIN}  退出"
     echo ""
     hr
-    read -rp "  请输入选项 [0-6]: " choice
+    read -rp "  请输入选项 [0-7]: " choice
     echo ""
 
     case $choice in
@@ -780,13 +902,16 @@ show_menu() {
         6)
             show_status
             ;;
+        7)
+            uninstall_optimizations
+            ;;
         0)
-            echo -e "${GREEN}  感谢使用 VPS值得买 BBR 脚本，再见！${PLAIN}"
+            echo -e "${GREEN}  感谢使用 BBR 脚本，再见！${PLAIN}"
             echo ""
             exit 0
             ;;
         *)
-            error "无效选项，请输入 0-6"
+            error "无效选项，请输入 0-7"
             ;;
     esac
 
@@ -799,6 +924,11 @@ show_menu() {
 # ════════════════════════════════════════════
 #   入口：预检查 → 智能判断 → 主菜单
 # ════════════════════════════════════════════
+if [[ "${1:-}" == "--uninstall" ]]; then
+    uninstall_optimizations
+    exit $?
+fi
+
 clear
 banner
 
@@ -806,7 +936,6 @@ echo -e "${BLUE}  ◆ 执行环境预检查...${PLAIN}"
 echo ""
 
 check_dependencies
-check_network
 check_virt
 fixCentOSRepo
 
