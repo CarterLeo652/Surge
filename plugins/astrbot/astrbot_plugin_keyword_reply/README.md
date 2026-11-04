@@ -2,8 +2,6 @@
 
 AstrBot 的 Telegram 群关键词自动回复插件。规则由 AstrBot 管理面板编辑，不需要 AI 模型或知识库。
 
-插件包根目录包含 `logo.png`，安装后用于 AstrBot 插件列表图标。
-
 ## 安装
 
 在 AstrBot 管理面板的「插件 → 安装插件」上传本插件 ZIP。安装后打开插件详情中的「rules」页面管理规则。也可以将整个插件目录放进 AstrBot 的 `data/plugins/`，再重载插件。
