@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from astrbot.api import AstrBotConfig, logger
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.api.web import PluginUploadFile, error_response, json_response, request
@@ -38,7 +38,7 @@ def message_facts(message: object) -> MessageFacts:
 
 
 class KeywordReply(Star):
-    def __init__(self, context: Context, config: AstrBotConfig) -> None:
+    def __init__(self, context: Context) -> None:
         super().__init__(context)
         data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
         self.store = RuleStore(data_dir)

@@ -63,7 +63,7 @@ class RuntimeTests(unittest.TestCase):
             with patch.dict(sys.modules, stubs):
                 sys.modules.pop("astrbot_plugin_keyword_reply.main", None)
                 plugin_module = importlib.import_module("astrbot_plugin_keyword_reply.main")
-                plugin = plugin_module.KeywordReply(Context(), {"enabled": False})
+                plugin = plugin_module.KeywordReply(Context())
                 plugin.store.replace([
                     {"group_id": "-100123", "pattern": "菜单", "priority": 1, "templates": [{"kind": "text", "text": "高优先级"}]},
                     {"group_id": "-100123", "pattern": "菜单", "priority": 0, "templates": [{"kind": "text", "text": "低优先级"}]},
