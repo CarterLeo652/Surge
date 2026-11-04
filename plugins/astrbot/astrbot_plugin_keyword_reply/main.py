@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.api.web import PluginUploadFile, error_response, json_response, request
@@ -38,8 +38,9 @@ def message_facts(message: object) -> MessageFacts:
 
 
 class KeywordReply(Star):
-    def __init__(self, context: Context) -> None:
+    def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
         super().__init__(context)
+        self.config = config if config is not None else {}
         data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
         self.store = RuleStore(data_dir)
         self._save_lock = asyncio.Lock()
@@ -197,5 +198,6 @@ class KeywordReply(Star):
                 except Exception as exc:
                     logger.warning(f"关键词回复删除原消息失败（规则 {rule['id']}，群 {group_id}）：{exc}")
             self._last_sent[cooldown_key] = now
-            event.stop_event()
+            if self.config.get("stop_after_reply", True):
+                event.stop_event()
             return

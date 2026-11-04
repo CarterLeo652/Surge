@@ -103,6 +103,15 @@ class RuntimeTests(unittest.TestCase):
                 asyncio.run(send_and_delete())
                 self.assertEqual([item["message_id"] for item in bot.deleted], [2, 3])
                 self.assertTrue(all(item["chat_id"] == -100123 for item in bot.deleted))
+                allowing_plugin = plugin_module.KeywordReply(Context(), {"stop_after_reply": False})
+                allowing_plugin.store.replace([{
+                    "group_id": "-100123", "pattern": "菜单",
+                    "templates": [{"kind": "text", "text": "继续处理"}],
+                }])
+                event = FakeEvent(bot, message)
+                asyncio.run(allowing_plugin.on_group_message(event))
+                self.assertEqual(bot.sent[-1]["text"], "继续处理")
+                self.assertFalse(event.stopped)
             sys.modules.pop("astrbot_plugin_keyword_reply.main", None)
 
 
