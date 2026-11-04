@@ -19,6 +19,7 @@ include = [
     "locales/zh.yml",
     "UPSTREAM_SOURCE.json",
     "metadata.yaml",
+    "logo.png",
     "_conf_schema.json",
     "requirements.txt",
     "README.md",
