@@ -1,6 +1,6 @@
 name: astrbot_plugin_vps_tools
 display_name: VPS 网络工具
 desc: IP、BGP、WHOIS 和 DNS 查询
-version: v0.4.3
+version: v0.4.4
 author: chenkeyu
 

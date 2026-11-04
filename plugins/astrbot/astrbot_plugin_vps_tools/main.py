@@ -102,7 +102,8 @@ class VpsTools(Star):
     def _group_allowed(self, event: AstrMessageEvent) -> bool:
         return group_allowed(event.get_group_id(),
                              self.config.get("enabled_groups", []),
-                             self.config.get("disabled_groups", []))
+                             self.config.get("disabled_groups", []),
+                             enabled=self.config.get("enabled", True))
 
     @filter.command("vps_ip")
     async def vps_ip(self, event: AstrMessageEvent):

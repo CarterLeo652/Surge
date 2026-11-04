@@ -22,6 +22,8 @@ from astrbot_plugin_vps_tools.whois_history import WhoisHistory
 
 class ParityTests(unittest.TestCase):
     def test_group_scope_matches_happy_repeat_allow_and_deny_lists(self):
+        self.assertFalse(group_allowed(None, [], [], enabled=False))
+        self.assertFalse(group_allowed("-123", [], [], enabled=False))
         self.assertTrue(group_allowed("-123", [], []))
         self.assertTrue(group_allowed(None, ["-123"], []))
         self.assertTrue(group_allowed("-123#456", ["-123"], []))

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 
-def group_allowed(group_id: str | None, enabled_groups: list, disabled_groups: list) -> bool:
-    """Allow private chats; match either a group or a Telegram topic ID."""
+def group_allowed(group_id: str | None, enabled_groups: list, disabled_groups: list,
+                  *, enabled: bool = True) -> bool:
+    """Apply the plugin switch, then group and Telegram topic rules."""
+    if not enabled:
+        return False
     if not group_id:
         return True
     group = str(group_id)

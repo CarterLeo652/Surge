@@ -1,4 +1,9 @@
 {
+  "enabled": {
+    "description": "启用 VPS 网络工具",
+    "type": "bool",
+    "default": true
+  },
   "enabled_groups": {
     "description": "只在这些群启用（留空表示所有群；填群 ID）",
     "type": "list",
