@@ -1,0 +1,14 @@
+{
+  "auto_delete": {
+    "description": "自动删除插件回复",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，自动删除本插件在 Telegram 发送的查询结果、图片和错误提示；不会删除用户的命令。"
+  },
+  "auto_delete_seconds": {
+    "description": "自动删除时间（秒）",
+    "type": "int",
+    "default": 300,
+    "hint": "从最终结果发出时开始计时，范围 1 到 86400 秒。关闭自动删除时此设置不生效。"
+  }
+}
