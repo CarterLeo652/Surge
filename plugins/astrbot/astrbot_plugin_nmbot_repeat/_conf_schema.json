@@ -1,0 +1,39 @@
+{
+  "enabled": {
+    "description": "启用欢乐复读",
+    "type": "bool",
+    "default": true
+  },
+  "enabled_groups": {
+    "description": "只在这些群启用（留空表示所有 Telegram 群；填群 ID）",
+    "type": "list",
+    "default": []
+  },
+  "disabled_groups": {
+    "description": "禁用的群 ID（优先于启用列表）",
+    "type": "list",
+    "default": []
+  },
+  "min_members": {
+    "description": "连续发送相同内容所需的不同群成员数",
+    "type": "int",
+    "default": 2,
+    "slider": {"min": 2, "max": 10, "step": 1}
+  },
+  "window_seconds": {
+    "description": "连续复读的最长消息间隔（秒）",
+    "type": "int",
+    "default": 120,
+    "slider": {"min": 10, "max": 600, "step": 10}
+  },
+  "block_links": {
+    "description": "不复读包含链接的消息（基础防广告）",
+    "type": "bool",
+    "default": true
+  },
+  "debug_logging": {
+    "description": "输出复读判定日志（排障后可关闭）",
+    "type": "bool",
+    "default": false
+  }
+}
