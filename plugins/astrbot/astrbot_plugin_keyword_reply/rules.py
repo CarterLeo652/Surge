@@ -48,6 +48,7 @@ def validate_rule(raw: Any, *, allowed_media: set[str] | None = None) -> dict:
         rule_id = str(uuid.UUID(rule_id))
     except (TypeError, ValueError, AttributeError) as exc:
         raise ValueError("规则 ID 无效") from exc
+    rule_name = _string(raw.get("name", ""), "规则名称", 80, empty=True)
     group_id = _string(raw.get("group_id"), "群 ID", 32)
     if not re.fullmatch(r"-?\d+", group_id):
         raise ValueError("群 ID 必须是 Telegram 数字 ID")
@@ -104,7 +105,7 @@ def validate_rule(raw: Any, *, allowed_media: set[str] | None = None) -> dict:
     cooldown = _integer(raw.get("cooldown_seconds", 0), "冷却秒数", 0, 86400)
     priority = _integer(raw.get("priority", 0), "优先级", -100, 100)
     return {
-        "id": rule_id, "group_id": group_id, "topic_id": topic_id,
+        "id": rule_id, "name": rule_name, "group_id": group_id, "topic_id": topic_id,
         "pattern": pattern, "mode": mode, "targets": targets,
         "ignore_case": ignore_case, "ignore_forward": ignore_forward,
         "enabled": enabled, "templates": clean_templates,

@@ -29,7 +29,7 @@ const check = (label, name, checked) =>
 
 function newRule() {
   return {
-    id: "", group_id: "", topic_id: "", pattern: "", mode: "contains",
+    id: "", name: "", group_id: "", topic_id: "", pattern: "", mode: "contains",
     targets: ["text"], ignore_case: true, ignore_forward: false, enabled: true,
     templates: [{kind: "text", text: ""}], response_mode: "random",
     reply_to_source: true, delete_source: false, cooldown_seconds: 0, priority: 0
@@ -63,7 +63,7 @@ function visibleIndexes() {
   return rules.flatMap((rule, index) => {
     if (filter === "enabled" && !rule.enabled) return [];
     if (filter === "disabled" && rule.enabled) return [];
-    if (needle && !`${rule.pattern} ${rule.group_id}`.toLocaleLowerCase().includes(needle)) return [];
+    if (needle && !`${rule.name || ""} ${rule.pattern} ${rule.group_id}`.toLocaleLowerCase().includes(needle)) return [];
     return [index];
   });
 }
@@ -74,7 +74,7 @@ function renderList() {
   listEl.innerHTML = visible.length ? visible.map(index => {
     const rule = rules[index];
     return `<button type="button" class="rule-item ${index === selected ? "active" : ""} ${rule.enabled ? "" : "off"}" data-index="${index}" aria-current="${index === selected ? "true" : "false"}">
-      <span class="rule-name">${esc(rule.pattern?.trim() || "未命名规则")}</span>
+      <span class="rule-name">${esc(rule.name?.trim() || rule.pattern?.trim() || "未命名规则")}</span>
       <span class="rule-meta"><span class="state-dot" aria-hidden="true"></span><span class="group">${esc(rule.group_id || "待填写群 ID")}</span><span>·</span><span>${rule.enabled ? "已启用" : "已停用"}</span></span>
     </button>`;
   }).join("") : `<p class="list-empty">${rules.length ? "没有符合条件的规则。试试其他关键词或筛选条件。" : "还没有规则。点击“新建”开始。"}</p>`;
@@ -120,9 +120,12 @@ function renderEditor() {
   }
   editorEl.innerHTML = `
     <div class="editor-head">
-      <div><span class="eyebrow">当前规则</span><h2 id="ruleTitle">${esc(rule.pattern?.trim() || "未命名规则")}</h2><p>匹配成功后，机器人将发送下方设置的回复。</p></div>
+      <div><span class="eyebrow">当前规则</span><h2 id="ruleTitle">${esc(rule.name?.trim() || rule.pattern?.trim() || "未命名规则")}</h2><p>匹配成功后，机器人将发送下方设置的回复。</p></div>
       <div class="editor-actions"><button id="duplicateRule" class="button button-quiet" type="button">复制</button><button id="removeRule" class="button button-text-danger" type="button">删除</button></div>
     </div>
+    <section class="rule-section">
+      <div class="field rule-name-field"><label for="ruleName">规则名称 <span class="hint">可选，仅供管理时辨认</span></label><input id="ruleName" data-field="name" maxlength="80" value="${esc(rule.name || "")}" placeholder="例如：本群专属订阅"></div>
+    </section>
     <section class="rule-section">
       <div class="section-title"><div><h3>触发消息</h3><p>先指定群，再填写成员发送的关键词。</p></div><label class="switch"><input type="checkbox" data-check="enabled" ${rule.enabled ? "checked" : ""}><span class="switch-track" aria-hidden="true"></span>启用规则</label></div>
       <div class="form-grid">
@@ -156,13 +159,14 @@ function renderEditor() {
     deleteTarget = rule;
     deleteDialog.returnValue = "";
     document.getElementById("deleteDescription").textContent =
-      `“${rule.pattern || "未命名规则"}”将从列表移除。点击“保存更改”后才会生效。`;
+      `“${rule.name?.trim() || rule.pattern || "未命名规则"}”将从列表移除。点击“保存更改”后才会生效。`;
     deleteDialog.showModal();
   });
   editorEl.querySelector("#duplicateRule").addEventListener("click", () => {
     if (rules.length >= 500) return setStatus("最多支持 500 条规则", "error");
     const copy = structuredClone(rule);
     copy.id = "";
+    copy.name = "";
     copy.pattern = "";
     rules.push(copy);
     query = "";
@@ -171,7 +175,7 @@ function renderEditor() {
     syncFilterButtons();
     selectRule(rules.length - 1);
     changed();
-    editorEl.querySelector("#pattern").focus();
+    editorEl.querySelector("#ruleName").focus();
   });
   editorEl.querySelectorAll("[data-field]").forEach(input => {
     const update = () => {
@@ -179,7 +183,7 @@ function renderEditor() {
       rule[key] = ["priority", "cooldown_seconds"].includes(key) ?
         (input.value === "" ? NaN : Number(input.value)) : input.value;
       clearFieldError(input);
-      if (key === "pattern") document.getElementById("ruleTitle").textContent = rule.pattern.trim() || "未命名规则";
+      if (key === "pattern" || key === "name") document.getElementById("ruleTitle").textContent = rule.name?.trim() || rule.pattern.trim() || "未命名规则";
       changed();
     };
     input.addEventListener(input.tagName === "SELECT" ? "change" : "input", update);
@@ -282,6 +286,7 @@ function renderTemplates() {
 }
 
 function validateRule(rule) {
+  if (typeof rule.name !== "string" || rule.name.trim().length > 80) return ["规则名称不能超过 80 字", "#ruleName"];
   if (typeof rule.group_id !== "string" || !/^-?\d{1,31}$/.test(rule.group_id)) return ["请输入有效的 Telegram 数字群 ID", "#groupId"];
   if (typeof rule.topic_id !== "string" || (rule.topic_id && !/^\d{1,32}$/.test(rule.topic_id))) return ["话题 ID 只能包含数字", "#topicId"];
   if (typeof rule.pattern !== "string" || !rule.pattern.trim() || rule.pattern.trim().length > 256) return ["请输入不超过 256 字的关键词", "#pattern"];

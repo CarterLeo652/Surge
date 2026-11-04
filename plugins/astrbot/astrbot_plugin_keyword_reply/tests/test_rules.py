@@ -16,6 +16,15 @@ def sample(**overrides):
 
 
 class RuleTests(unittest.TestCase):
+    def test_rule_name_is_saved_without_affecting_matching(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuleStore(Path(folder))
+            saved = store.replace([sample(name="本群专属订阅")])
+            self.assertEqual(saved[0]["name"], "本群专属订阅")
+            self.assertEqual(RuleStore(Path(folder)).rules[0]["name"], "本群专属订阅")
+            self.assertTrue(matches(saved[0], MessageFacts(text="菜单")))
+            self.assertFalse(matches(saved[0], MessageFacts(text="本群专属订阅")))
+
     def test_match_modes_and_targets(self):
         self.assertTrue(matches(sample(), MessageFacts(text="看看菜单吧")))
         self.assertFalse(matches(sample(mode="exact"), MessageFacts(text="看看菜单吧")))
