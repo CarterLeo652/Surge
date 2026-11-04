@@ -112,6 +112,16 @@ class RuntimeTests(unittest.TestCase):
                 asyncio.run(allowing_plugin.on_group_message(event))
                 self.assertEqual(bot.sent[-1]["text"], "继续处理")
                 self.assertFalse(event.stopped)
+                paused_plugin = plugin_module.KeywordReply(Context(), {"enabled": False})
+                paused_plugin.store.replace([{
+                    "group_id": "-100123", "pattern": "菜单",
+                    "templates": [{"kind": "text", "text": "不应发送"}],
+                }])
+                event = FakeEvent(bot, message)
+                sent_count = len(bot.sent)
+                asyncio.run(paused_plugin.on_group_message(event))
+                self.assertEqual(len(bot.sent), sent_count)
+                self.assertFalse(event.stopped)
             sys.modules.pop("astrbot_plugin_keyword_reply.main", None)
 
 

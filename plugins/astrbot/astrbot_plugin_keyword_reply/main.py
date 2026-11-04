@@ -149,6 +149,8 @@ class KeywordReply(Star):
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
     async def on_group_message(self, event: AstrMessageEvent) -> None:
+        if not self.config.get("enabled", True):
+            return
         if getattr(event.platform_meta, "name", "") != "telegram":
             return
         update = event.message_obj.raw_message

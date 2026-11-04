@@ -1,4 +1,10 @@
 {
+  "enabled": {
+    "description": "启用关键词回复",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后暂停执行所有关键词规则，已保存的规则仍会保留。"
+  },
   "stop_after_reply": {
     "description": "命中回复后阻止后续处理",
     "type": "bool",
