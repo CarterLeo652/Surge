@@ -29,8 +29,8 @@ sys.modules.update(
     }
 )
 
-from astrbot_plugin_nmbot_repeat.main import NMBotRepeat, message_key  # noqa: E402
-from astrbot_plugin_nmbot_repeat.repeater import RepeatTracker  # noqa: E402
+from astrbot_plugin_happy_repeat.main import HappyRepeat, message_key  # noqa: E402
+from astrbot_plugin_happy_repeat.repeater import RepeatTracker  # noqa: E402
 
 
 class FakeBot:
@@ -94,7 +94,7 @@ class RepeatTrackerTests(unittest.TestCase):
 class PluginTests(unittest.TestCase):
     def test_repeats_and_resets_on_intervening_message(self):
         bot = FakeBot()
-        plugin = NMBotRepeat(object(), {})
+        plugin = HappyRepeat(object(), {})
 
         async def run():
             await plugin.on_group_message(make_event(bot, "-100123", 1, 1))
@@ -109,7 +109,7 @@ class PluginTests(unittest.TestCase):
 
     def test_topic_copy_and_link_blocking(self):
         bot = FakeBot()
-        plugin = NMBotRepeat(object(), {})
+        plugin = HappyRepeat(object(), {})
 
         async def run():
             await plugin.on_group_message(make_event(bot, "-100123#5", 1, 1, text="https://example.com"))
@@ -129,7 +129,7 @@ class PluginTests(unittest.TestCase):
 
     def test_reply_then_plain_message_with_same_visible_text(self):
         bot = FakeBot()
-        plugin = NMBotRepeat(object(), {})
+        plugin = HappyRepeat(object(), {})
 
         async def run():
             first = make_event(bot, "-100123", 5734634964, 100, text="啥复读机")
@@ -143,7 +143,7 @@ class PluginTests(unittest.TestCase):
 
     def test_reply_then_forward_with_same_text(self):
         bot = FakeBot()
-        plugin = NMBotRepeat(object(), {})
+        plugin = HappyRepeat(object(), {})
 
         async def run():
             first = make_event(bot, "-100123", 5734634964, 100, text="啥复读机")
@@ -164,7 +164,7 @@ class PluginTests(unittest.TestCase):
 
     def test_photo_breaks_run(self):
         bot = FakeBot()
-        plugin = NMBotRepeat(object(), {})
+        plugin = HappyRepeat(object(), {})
 
         async def run():
             await plugin.on_group_message(make_event(bot, "-100123", 1, 100, text="复读机也开发出来了"))
@@ -178,7 +178,7 @@ class PluginTests(unittest.TestCase):
 
     def test_missing_photo_event_still_breaks_run_by_message_id(self):
         bot = FakeBot()
-        plugin = NMBotRepeat(object(), {})
+        plugin = HappyRepeat(object(), {})
 
         async def run():
             await plugin.on_group_message(make_event(bot, "-100123", 1, 100, text="复读机也开发出来了"))
@@ -191,7 +191,7 @@ class PluginTests(unittest.TestCase):
 
     def test_late_photo_event_from_reported_log(self):
         bot = FakeBot()
-        plugin = NMBotRepeat(object(), {})
+        plugin = HappyRepeat(object(), {})
 
         async def run():
             await plugin.on_group_message(make_event(bot, "-100123", 5158534585, 98551, text="复读机也开发出来了"))
@@ -207,7 +207,7 @@ class PluginTests(unittest.TestCase):
 
     def test_forwarded_message_uses_telegram_forward(self):
         bot = FakeBot()
-        plugin = NMBotRepeat(object(), {})
+        plugin = HappyRepeat(object(), {})
         origin = SimpleNamespace(
             sender_user=SimpleNamespace(id=77),
             chat=None,
@@ -228,7 +228,7 @@ class PluginTests(unittest.TestCase):
 
     def test_group_allowlist(self):
         bot = FakeBot()
-        plugin = NMBotRepeat(object(), {"enabled_groups": ["-100456"]})
+        plugin = HappyRepeat(object(), {"enabled_groups": ["-100456"]})
 
         async def run():
             await plugin.on_group_message(make_event(bot, "-100123", 1, 1))

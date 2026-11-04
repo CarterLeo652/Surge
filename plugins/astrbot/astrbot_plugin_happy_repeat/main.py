@@ -1,4 +1,4 @@
-"""AstrBot adapter for a nmBot-style group repeater on Telegram."""
+"""AstrBot adapter for a group repeater on Telegram."""
 
 from __future__ import annotations
 
@@ -82,13 +82,13 @@ def contains_link(message: object) -> bool:
     return any(getattr(entity, "type", None) in {"url", "text_link"} for entity in entities)
 
 
-class NMBotRepeat(Star):
+class HappyRepeat(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
         self.config = config
         self.tracker = RepeatTracker()
         self._last_prune = 0.0
-        logger.info("欢乐复读 v1.0.4 已启动")
+        logger.info("欢乐复读 v1.0.7 已启动")
 
     def _trace(self, group: str, message: object, reason: str) -> None:
         if not self.config.get("debug_logging", False):

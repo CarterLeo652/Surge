@@ -1,7 +1,7 @@
-name: astrbot_plugin_nmbot_repeat
-display_name: 欢乐复读（nmBot 风格）
+name: astrbot_plugin_happy_repeat
+display_name: 欢乐复读
 desc: 多位群成员连续发送相同消息时，机器人自动复读一次。
-version: v1.0.4
+version: v1.0.7
 author: Codex
 support_platforms:
   - telegram
