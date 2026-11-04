@@ -1,0 +1,2 @@
+# AstrBot 及 Telegram SDK 由运行环境提供。
+PyYAML>=6.0,<7
