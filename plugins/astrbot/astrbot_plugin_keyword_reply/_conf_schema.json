@@ -1,7 +1,1 @@
-{
-  "enabled": {
-    "description": "启用关键词回复",
-    "type": "bool",
-    "default": true
-  }
-}
+{}

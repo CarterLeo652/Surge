@@ -40,7 +40,6 @@ def message_facts(message: object) -> MessageFacts:
 class KeywordReply(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
-        self.config = config
         data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
         self.store = RuleStore(data_dir)
         self._save_lock = asyncio.Lock()
@@ -149,8 +148,6 @@ class KeywordReply(Star):
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
     async def on_group_message(self, event: AstrMessageEvent) -> None:
-        if not self.config.get("enabled", True):
-            return
         if getattr(event.platform_meta, "name", "") != "telegram":
             return
         update = event.message_obj.raw_message
