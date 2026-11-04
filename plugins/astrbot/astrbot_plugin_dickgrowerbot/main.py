@@ -22,6 +22,7 @@ from .settings import Settings
 class DickGrowerBotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config
         self.settings = Settings.from_mapping(config)
         self.game = Game(
             database_path(StarTools.get_data_dir("astrbot_plugin_dickgrowerbot")), self.settings
@@ -51,6 +52,18 @@ class DickGrowerBotPlugin(Star):
     def group_only(chat):
         if chat.type not in {"group", "supergroup"}:
             raise GameError(tr("errors.not_group_chat"))
+
+    def group_lists(self):
+        enabled = {str(value).strip() for value in self.config.get("enabled_groups", []) or []}
+        disabled = {str(value).strip() for value in self.config.get("disabled_groups", []) or []}
+        return enabled - {""}, disabled - {""}
+
+    def group_enabled(self, chat_id):
+        if not self.config.get("enabled", True):
+            return False
+        enabled, disabled = self.group_lists()
+        chat_id = str(chat_id)
+        return (not enabled or chat_id in enabled) and chat_id not in disabled
 
     @staticmethod
     def amount(value, default=None):
@@ -139,6 +152,18 @@ class DickGrowerBotPlugin(Star):
             await self.send(event, message, kind="notice")
 
     async def execute(self, event, action, *, private=False):
+        if not self.config.get("enabled", True):
+            return
+        if event.get_platform_name() == "telegram":
+            update = event.message_obj.raw_message
+            chat = update.effective_chat
+            if chat and chat.type in {"group", "supergroup"} and not self.group_enabled(chat.id):
+                if update.callback_query is not None:
+                    event.stop_event()
+                    await update.callback_query.answer(
+                        text="本群未启用 DickGrowerBot。", show_alert=True
+                    )
+                return
         event.stop_event()
         try:
             env = self.environment(event)
@@ -360,7 +385,10 @@ class DickGrowerBotPlugin(Star):
 
         async def action(update, user, chat, scope):
             if chat.type == "private":
-                result = await asyncio.to_thread(self.game.personal_stats, scope[0], str(user.id))
+                enabled, disabled = self.group_lists()
+                result = await asyncio.to_thread(
+                    self.game.personal_stats, scope[0], str(user.id), enabled, disabled
+                )
                 await self.send(event, tr("commands.stats.personal", **result), kind="report")
             else:
                 result = await asyncio.to_thread(self.game.stats, scope, str(user.id))

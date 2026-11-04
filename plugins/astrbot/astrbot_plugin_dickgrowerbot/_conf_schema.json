@@ -1,4 +1,19 @@
 {
+  "enabled": {
+    "description": "启用 DickGrowerBot",
+    "type": "bool",
+    "default": true
+  },
+  "enabled_groups": {
+    "description": "只在这些群启用（留空表示所有 Telegram 群；填群 ID）",
+    "type": "list",
+    "default": []
+  },
+  "disabled_groups": {
+    "description": "禁用的群 ID（优先于启用列表）",
+    "type": "list",
+    "default": []
+  },
   "refresh_hours": {
     "description": "签到刷新间隔（小时）",
     "type": "float",

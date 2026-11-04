@@ -300,7 +300,39 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         plugin = DickGrowerBotPlugin(SimpleNamespace(), config)
         self.assertEqual(plugin.settings.refresh_mode, "group_interval")
         self.assertEqual(plugin.settings.daily_time, "00:00")
-        self.assertEqual(set(schema), {"refresh_hours"})
+        self.assertEqual(
+            set(schema), {"enabled", "enabled_groups", "disabled_groups", "refresh_hours"}
+        )
+
+    async def test_group_lists_gate_commands_without_consuming_disabled_messages(self):
+        self.plugin.config["enabled_groups"] = ["-100999"]
+        blocked = self.command_event(1, "/dick_grow")
+        await self.plugin.grow(blocked)
+        self.assertFalse(blocked._force_stopped)
+        self.assertFalse(self.calls("sendMessage"))
+        allowed = self.command_event(1, "/dick_grow", chat_id=-100999)
+        await self.plugin.grow(allowed)
+        self.assertTrue(allowed._force_stopped)
+        self.assertEqual(len(self.calls("sendMessage")), 1)
+
+        self.plugin.config["disabled_groups"] = [-100999]
+        await self.plugin.grow(self.command_event(1, "/dick_grow", 11, chat_id=-100999))
+        self.assertEqual(len(self.calls("sendMessage")), 1)
+        self.plugin.config["enabled"] = False
+        await self.plugin.grow(self.command_event(1, "/dick_grow", 12))
+        self.assertEqual(len(self.calls("sendMessage")), 1)
+
+    async def test_disabled_group_cannot_use_existing_pk_button(self):
+        self.seed(1)
+        self.seed(2)
+        token, message = await self.make_pk()
+        self.plugin.config["disabled_groups"] = [self.scope[1]]
+        await self.plugin.pk_clicked(await self.click_event(2, token, message))
+        self.assertFalse(self.calls("editMessageText"))
+        self.assertEqual(
+            self.calls("answerCallbackQuery")[-1]["text"], "本群未启用 DickGrowerBot。"
+        )
+        self.assertEqual(sum(self.plugin.game.stats(self.scope, str(i))["wins"] for i in [1, 2]), 0)
 
     async def test_grow_preserves_forum_topic_and_stops_model_pipeline(self):
         event = self.command_event(1, "/dick_grow", topic=42)
@@ -462,6 +494,26 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.calls("sendMessage")[-1]["text"],
             tr("commands.stats.personal", chats=1, max_length=10, total_length=10),
+        )
+
+    async def test_private_stats_only_include_enabled_groups(self):
+        self.seed(1)
+        self.plugin.game.grow((self.scope[0], "-100999"), "1", "鸡友1", "other-chat")
+        self.plugin.config["enabled_groups"] = ["-100999"]
+        event = self.command_event(1, "/dick_stats", message_id=401, chat_id=1)
+        raw = event.message_obj.raw_message.to_dict()
+        raw["message"]["chat"]["type"] = "private"
+        event.message_obj.raw_message = Update.de_json(raw, self.bot)
+        await self.plugin.stats(event)
+        self.assertEqual(
+            self.calls("sendMessage")[-1]["text"],
+            tr("commands.stats.personal", chats=1, max_length=10, total_length=10),
+        )
+        self.plugin.config["disabled_groups"] = ["-100999"]
+        await self.plugin.stats(event)
+        self.assertEqual(
+            self.calls("sendMessage")[-1]["text"],
+            tr("commands.stats.personal", chats=0, max_length=0, total_length=0),
         )
 
 

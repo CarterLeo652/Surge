@@ -176,9 +176,11 @@ class UpstreamTests(unittest.TestCase):
             "长度: <b>10</b>\n在排行榜上的位置: <b>1</b>\n\n胜率: <b>0%</b>。\n战斗次数: <b>0</b>。\n胜利次数: <b>0</b>。\n最大连胜: <b>0</b>。\n获得长度: <b>0 厘米</b>。\n失去长度: <b>0 厘米</b>。",
         )
 
-    def test_only_refresh_interval_is_publicly_configurable(self):
+    def test_only_refresh_interval_changes_game_settings(self):
         schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text())
-        self.assertEqual(set(schema), {"refresh_hours"})
+        self.assertEqual(
+            set(schema), {"enabled", "enabled_groups", "disabled_groups", "refresh_hours"}
+        )
         cfg = Settings.from_mapping(
             {"refresh_hours": 0.5, "growth_min": 999, "streak_enabled": False}
         )

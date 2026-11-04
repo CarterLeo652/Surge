@@ -426,13 +426,23 @@ class Game:
             result["next"] = self.settings.next_due(row["last_grow"] if row else None, self.clock())
             return result
 
-    def personal_stats(self, bot, uid):
+    def personal_stats(self, bot, uid, enabled_groups=None, disabled_groups=None):
         with closing(self.connect()) as db:
-            row = db.execute(
-                "SELECT COUNT(*),MAX(length),SUM(length) FROM players WHERE bot=? AND uid=?",
+            rows = db.execute(
+                "SELECT chat,length FROM players WHERE bot=? AND uid=?",
                 (bot, str(uid)),
-            ).fetchone()
-            return {"chats": row[0], "max_length": row[1] or 0, "total_length": row[2] or 0}
+            ).fetchall()
+            lengths = [
+                row["length"]
+                for row in rows
+                if (not enabled_groups or row["chat"] in enabled_groups)
+                and (not disabled_groups or row["chat"] not in disabled_groups)
+            ]
+            return {
+                "chats": len(lengths),
+                "max_length": max(lengths, default=0),
+                "total_length": sum(lengths),
+            }
 
     def dick_of_day(self, scope):
         now = self.clock()

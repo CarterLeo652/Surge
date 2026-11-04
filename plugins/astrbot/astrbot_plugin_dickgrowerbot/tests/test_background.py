@@ -44,6 +44,30 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
         self.clock.now += 7 * 86400
         await self.plugin.background.run_daily_once()
 
+    async def test_disabled_group_skips_daily_shrink_until_reenabled(self):
+        self.seed(1)
+        with self.plugin.game.transaction() as db:
+            db.execute("UPDATE players SET length=100")
+        self.clock.now += 7 * 86400
+        self.plugin.config["disabled_groups"] = [self.scope[1]]
+        await self.plugin.background.run_daily_once()
+        self.assertEqual(self.plugin.game.stats(self.scope, "1")["length"], 100)
+        self.assertEqual(self.table("shrink_runs"), [])
+        self.plugin.config["disabled_groups"] = []
+        await self.plugin.background.run_daily_once()
+        self.assertEqual(self.plugin.game.stats(self.scope, "1")["length"], 98)
+
+    async def test_disabled_group_cancels_pending_message_cleanup(self):
+        self.seed(1)
+        self.plugin.maintenance.set_cleanup(self.scope, "report", 1)
+        await self.plugin.top(self.command_event(1, "/dick_top"))
+        self.assertTrue(self.table("deletion_jobs"))
+        self.clock.now += 61
+        self.plugin.config["disabled_groups"] = [self.scope[1]]
+        await self.plugin.background.run_queue_once()
+        self.assertEqual(self.calls("deleteMessage"), [])
+        self.assertTrue(all(job["state"] == "cancelled" for job in self.table("deletion_jobs")))
+
     async def test_cleanup_menu_rejects_non_admin_and_requires_owner(self):
         await self.plugin.cleanup(self.command_event(2, "/dick_cleanup"))
         self.assertEqual(

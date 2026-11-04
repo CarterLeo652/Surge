@@ -78,6 +78,8 @@ class BackgroundTasks:
             return False
 
     async def record(self, client, scope, message, body, kind, command=None):
+        if not self.plugin.group_enabled(scope[1]):
+            return
         try:
             now = self.plugin.game.clock()
             created = message.date.timestamp() if message.date else now
@@ -108,7 +110,8 @@ class BackgroundTasks:
         for bot in self.clients():
             rooms = await asyncio.to_thread(self.store.rooms, bot)
             for room in rooms:
-                await asyncio.to_thread(self.store.run_shrink, (bot, room["chat"]))
+                if self.plugin.group_enabled(room["chat"]):
+                    await asyncio.to_thread(self.store.run_shrink, (bot, room["chat"]))
         await asyncio.to_thread(self.store.prune)
 
     async def run_queue_once(self):
@@ -128,6 +131,9 @@ class BackgroundTasks:
         scope = (job["bot"], job["chat"])
         async with self.semaphore, self.lock(scope):
             if not await asyncio.to_thread(self.store.is_claimed, job):
+                return
+            if not self.plugin.group_enabled(scope[1]):
+                await asyncio.to_thread(self.store.finish, job, state="cancelled")
                 return
             try:
                 await self._delete(client, job, scope)
