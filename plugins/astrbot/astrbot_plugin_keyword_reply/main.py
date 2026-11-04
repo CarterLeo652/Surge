@@ -45,6 +45,7 @@ class KeywordReply(Star):
         self.store = RuleStore(data_dir)
         self._save_lock = asyncio.Lock()
         self._last_sent: dict[tuple[str, str], float] = {}
+        self._delete_tasks: set[asyncio.Task] = set()
         context.register_web_api(f"/{PLUGIN_NAME}/rules", self.get_rules, ["GET"], "列出关键词规则")
         context.register_web_api(f"/{PLUGIN_NAME}/rules/save", self.save_rules, ["POST"], "保存关键词规则")
         context.register_web_api(f"/{PLUGIN_NAME}/media/upload", self.upload_media, ["POST"], "上传回复媒体")
@@ -98,7 +99,7 @@ class KeywordReply(Star):
             kind = "document"
         return json_response({"media_id": media_id, "kind": kind, "filename": upload.filename, "mime": mime})
 
-    async def _send_template(self, bot, message, rule: dict, template: dict) -> None:
+    async def _send_template(self, bot, message, rule: dict, template: dict):
         options = {"chat_id": message.chat.id}
         if getattr(message, "is_topic_message", False) and getattr(message, "message_thread_id", None):
             options["message_thread_id"] = message.message_thread_id
@@ -106,26 +107,45 @@ class KeywordReply(Star):
             options["reply_to_message_id"] = message.message_id
         kind = template["kind"]
         if kind == "text":
-            await bot.send_message(text=template["text"], **options)
-            return
+            return await bot.send_message(text=template["text"], **options)
         path = self.store.media_path(template["media_id"])
         if path is None:
             raise FileNotFoundError("回复媒体已丢失")
         with path.open("rb") as stream:
             if kind == "photo":
-                await bot.send_photo(photo=stream, caption=template["caption"] or None, **options)
+                return await bot.send_photo(photo=stream, caption=template["caption"] or None, **options)
             elif kind == "video":
-                await bot.send_video(video=stream, caption=template["caption"] or None, **options)
+                return await bot.send_video(video=stream, caption=template["caption"] or None, **options)
             elif kind == "animation":
-                await bot.send_animation(animation=stream, caption=template["caption"] or None, **options)
+                return await bot.send_animation(animation=stream, caption=template["caption"] or None, **options)
             elif kind == "audio":
-                await bot.send_audio(audio=stream, caption=template["caption"] or None, **options)
+                return await bot.send_audio(audio=stream, caption=template["caption"] or None, **options)
             elif kind == "voice":
-                await bot.send_voice(voice=stream, caption=template["caption"] or None, **options)
+                return await bot.send_voice(voice=stream, caption=template["caption"] or None, **options)
             elif kind == "document":
-                await bot.send_document(document=stream, caption=template["caption"] or None, **options)
+                return await bot.send_document(document=stream, caption=template["caption"] or None, **options)
             else:
                 raise ValueError("不支持的回复类型")
+
+    async def _delete_reply_after(self, bot, chat_id, message_id, delay_seconds: int) -> None:
+        await asyncio.sleep(delay_seconds)
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as exc:
+            logger.warning(f"关键词回复自动删除失败（群 {chat_id}，消息 {message_id}）：{exc}")
+
+    def _schedule_reply_deletion(self, bot, sent_message, rule: dict) -> None:
+        if not rule["auto_delete_reply"]:
+            return
+        message_id = getattr(sent_message, "message_id", None)
+        chat_id = getattr(getattr(sent_message, "chat", None), "id", None)
+        if message_id is None or chat_id is None:
+            logger.warning(f"关键词回复无法获取已发送消息 ID（规则 {rule['id']}），未安排自动删除")
+            return
+        task = asyncio.create_task(self._delete_reply_after(
+            bot, chat_id, message_id, rule["auto_delete_minutes"] * 60))
+        self._delete_tasks.add(task)
+        task.add_done_callback(self._delete_tasks.discard)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=100)
     async def on_group_message(self, event: AstrMessageEvent) -> None:
@@ -167,8 +187,9 @@ class KeywordReply(Star):
             sent_any = False
             try:
                 for template in templates:
-                    await self._send_template(bot, message, rule, template)
+                    sent_message = await self._send_template(bot, message, rule, template)
                     sent_any = True
+                    self._schedule_reply_deletion(bot, sent_message, rule)
             except Exception as exc:
                 logger.warning(f"关键词回复发送失败（规则 {rule['id']}，群 {group_id}）：{exc}")
                 if not sent_any:

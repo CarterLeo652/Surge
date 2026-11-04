@@ -178,6 +178,7 @@ h1 { margin-bottom: 3px; font-size: 25px; line-height: 1.25; letter-spacing: -.0
 .advanced[open] summary::after { transform: rotate(180deg); }
 .advanced .advanced-content { padding-top: 20px; }
 .advanced .subheading { margin: 18px 0 8px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.auto-delete-delay { max-width: 280px; margin-top: 10px; }
 .preview-panel { min-width: 0; padding: 26px 18px; border-left: 1px solid var(--line); background: var(--paper); }
 .preview-sticky { position: sticky; top: 22px; }
 .preview-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 14px; }

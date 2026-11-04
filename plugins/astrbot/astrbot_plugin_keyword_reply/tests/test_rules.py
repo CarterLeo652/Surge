@@ -16,6 +16,17 @@ def sample(**overrides):
 
 
 class RuleTests(unittest.TestCase):
+    def test_reply_auto_delete_settings_are_saved_and_checked(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = RuleStore(Path(folder))
+            saved = store.replace([sample(auto_delete_reply=True, auto_delete_minutes=3)])
+            self.assertTrue(saved[0]["auto_delete_reply"])
+            self.assertEqual(RuleStore(Path(folder)).rules[0]["auto_delete_minutes"], 3)
+        with self.assertRaises(ValueError):
+            sample(auto_delete_reply=True, auto_delete_minutes=0)
+        with self.assertRaises(ValueError):
+            sample(auto_delete_reply=True, auto_delete_minutes=1441)
+
     def test_rule_name_is_saved_without_affecting_matching(self):
         with tempfile.TemporaryDirectory() as folder:
             store = RuleStore(Path(folder))

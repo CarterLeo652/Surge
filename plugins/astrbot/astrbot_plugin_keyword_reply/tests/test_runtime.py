@@ -4,7 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 def module(name, **attrs):
@@ -22,6 +22,7 @@ class FakeBot:
 
     async def send_message(self, **kwargs):
         self.sent.append(kwargs)
+        return types.SimpleNamespace(message_id=len(self.sent), chat=types.SimpleNamespace(id=kwargs["chat_id"]))
 
     async def delete_message(self, **kwargs):
         self.deleted.append(kwargs)
@@ -85,6 +86,23 @@ class RuntimeTests(unittest.TestCase):
                 asyncio.run(plugin.on_group_message(event))
                 self.assertFalse(event.stopped)
                 self.assertEqual(len(bot.sent), 1)
+                plugin.store.replace([{
+                    "group_id": "-100123", "pattern": "菜单", "response_mode": "all",
+                    "auto_delete_reply": True, "auto_delete_minutes": 2,
+                    "templates": [{"kind": "text", "text": "回复一"}, {"kind": "text", "text": "回复二"}],
+                }])
+                message.chat.id = -100123
+                message.text = "菜单"
+
+                async def send_and_delete():
+                    with patch.object(plugin_module.asyncio, "sleep", new=AsyncMock()) as sleep:
+                        await plugin.on_group_message(FakeEvent(bot, message))
+                        await asyncio.gather(*plugin._delete_tasks)
+                        self.assertEqual([call.args[0] for call in sleep.await_args_list], [120, 120])
+
+                asyncio.run(send_and_delete())
+                self.assertEqual([item["message_id"] for item in bot.deleted], [2, 3])
+                self.assertTrue(all(item["chat_id"] == -100123 for item in bot.deleted))
             sys.modules.pop("astrbot_plugin_keyword_reply.main", None)
 
 

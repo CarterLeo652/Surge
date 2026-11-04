@@ -32,7 +32,8 @@ function newRule() {
     id: "", name: "", group_id: "", topic_id: "", pattern: "", mode: "contains",
     targets: ["text"], ignore_case: true, ignore_forward: false, enabled: true,
     templates: [{kind: "text", text: ""}], response_mode: "random",
-    reply_to_source: true, delete_source: false, cooldown_seconds: 0, priority: 0
+    reply_to_source: true, delete_source: false, auto_delete_reply: false,
+    auto_delete_minutes: 5, cooldown_seconds: 0, priority: 0
   };
 }
 
@@ -150,6 +151,8 @@ function renderEditor() {
       <p class="subheading">匹配选项</p><div class="check-row">${check("忽略英文大小写", "ignore_case", rule.ignore_case)}${check("忽略转发消息", "ignore_forward", rule.ignore_forward)}</div>
       <p class="subheading">发送动作</p><div class="check-row">${check("引用触发消息", "reply_to_source", rule.reply_to_source)}${check("删除触发消息", "delete_source", rule.delete_source)}</div>
       <p class="hint">删除消息需要机器人在群里拥有删除权限。</p>
+      <p class="subheading">回复自动删除</p><div class="check-row">${check("发送后自动删除机器人回复", "auto_delete_reply", rule.auto_delete_reply)}</div>
+      <div class="field auto-delete-delay"><label for="autoDeleteMinutes">发送后等待（分钟）</label><input id="autoDeleteMinutes" type="number" min="1" max="1440" step="1" data-field="auto_delete_minutes" value="${esc(rule.auto_delete_minutes ?? 5)}" ${rule.auto_delete_reply ? "" : "disabled"}><p class="hint">1～1440 分钟；每条回复分别计时。机器人需要删除消息权限。</p></div>
     </div></details>`;
 
   editorEl.querySelector(".advanced").addEventListener("toggle", event => {
@@ -180,7 +183,7 @@ function renderEditor() {
   editorEl.querySelectorAll("[data-field]").forEach(input => {
     const update = () => {
       const key = input.dataset.field;
-      rule[key] = ["priority", "cooldown_seconds"].includes(key) ?
+      rule[key] = ["priority", "cooldown_seconds", "auto_delete_minutes"].includes(key) ?
         (input.value === "" ? NaN : Number(input.value)) : input.value;
       clearFieldError(input);
       if (key === "pattern" || key === "name") document.getElementById("ruleTitle").textContent = rule.name?.trim() || rule.pattern.trim() || "未命名规则";
@@ -200,6 +203,15 @@ function renderEditor() {
       rule.targets = input.checked ? [...new Set([...rule.targets, target])] : rule.targets.filter(value => value !== target);
       editorEl.querySelector("#matchTargets .field-error")?.remove();
     } else rule[key] = input.checked;
+    if (key === "auto_delete_reply") {
+      const delayInput = editorEl.querySelector("#autoDeleteMinutes");
+      delayInput.disabled = !input.checked;
+      if (!input.checked && (!Number.isInteger(rule.auto_delete_minutes) || rule.auto_delete_minutes < 1 || rule.auto_delete_minutes > 1440)) {
+        rule.auto_delete_minutes = 5;
+        delayInput.value = "5";
+        clearFieldError(delayInput);
+      }
+    }
     changed();
     if (key === "enabled" && !visibleIndexes().includes(selected)) {
       selected = visibleIndexes()[0] ?? -1;
@@ -308,6 +320,8 @@ function validateRule(rule) {
   if (!["random", "all"].includes(rule.response_mode)) return ["发送方式无效", "#responseMode"];
   if (!Number.isInteger(rule.cooldown_seconds) || rule.cooldown_seconds < 0 || rule.cooldown_seconds > 86400)
     return ["触发间隔需在 0 到 86400 秒之间", "#cooldown"];
+  if (!Number.isInteger(rule.auto_delete_minutes) || rule.auto_delete_minutes < 1 || rule.auto_delete_minutes > 1440)
+    return ["自动删除时间需在 1 到 1440 分钟之间", "#autoDeleteMinutes"];
   if (!Number.isInteger(rule.priority) || rule.priority < -100 || rule.priority > 100)
     return ["优先级需在 -100 到 100 之间", "#priority"];
   return null;
@@ -316,7 +330,7 @@ function validateRule(rule) {
 function showValidationError(message, selector) {
   setStatus(message, "error");
   const input = editorEl.querySelector(selector);
-  if (selector === "#priority") {
+  if (selector === "#priority" || selector === "#autoDeleteMinutes") {
     const details = editorEl.querySelector(".advanced");
     details.open = true;
     advancedOpen = true;

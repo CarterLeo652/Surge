@@ -98,10 +98,13 @@ def validate_rule(raw: Any, *, allowed_media: set[str] | None = None) -> dict:
     ignore_forward = raw.get("ignore_forward", False)
     reply_to_source = raw.get("reply_to_source", True)
     delete_source = raw.get("delete_source", False)
+    auto_delete_reply = raw.get("auto_delete_reply", False)
     for name, value in (("启用", enabled), ("忽略转发", ignore_forward),
-                        ("引用原消息", reply_to_source), ("删除原消息", delete_source)):
+                        ("引用原消息", reply_to_source), ("删除原消息", delete_source),
+                        ("自动删除回复", auto_delete_reply)):
         if not isinstance(value, bool):
             raise ValueError(f"{name} 必须是布尔值")
+    auto_delete_minutes = _integer(raw.get("auto_delete_minutes", 5), "自动删除时间（分钟）", 1, 1440)
     cooldown = _integer(raw.get("cooldown_seconds", 0), "冷却秒数", 0, 86400)
     priority = _integer(raw.get("priority", 0), "优先级", -100, 100)
     return {
@@ -110,7 +113,8 @@ def validate_rule(raw: Any, *, allowed_media: set[str] | None = None) -> dict:
         "ignore_case": ignore_case, "ignore_forward": ignore_forward,
         "enabled": enabled, "templates": clean_templates,
         "response_mode": response_mode, "reply_to_source": reply_to_source,
-        "delete_source": delete_source, "cooldown_seconds": cooldown,
+        "delete_source": delete_source, "auto_delete_reply": auto_delete_reply,
+        "auto_delete_minutes": auto_delete_minutes, "cooldown_seconds": cooldown,
         "priority": priority,
     }
 
