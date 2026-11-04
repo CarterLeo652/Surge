@@ -1,7 +1,7 @@
 name: astrbot_plugin_dickgrowerbot
 display_name: DickGrowerBot
-desc: Who has the biggest dick ever? A game bot for Telegram
-version: v0.5.0
+desc: Telegram 群聊丁丁成长游戏，支持签到、斗鸡、排行榜和每日评选。
+version: v0.5.2
 author: chenkeyu
 repo: ""
 support_platforms:

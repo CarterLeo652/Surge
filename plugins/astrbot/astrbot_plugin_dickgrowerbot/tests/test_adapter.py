@@ -290,6 +290,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         root = Path(__file__).resolve().parents[1]
         metadata = PluginManager._load_plugin_metadata(str(root))
         self.assertEqual(metadata.display_name, "DickGrowerBot")
+        self.assertEqual(
+            metadata.desc,
+            "Telegram 群聊丁丁成长游戏，支持签到、斗鸡、排行榜和每日评选。",
+        )
         self.assertEqual(metadata.support_platforms, ["telegram"])
         schema = PluginManager._load_plugin_config_schema(str(root / "_conf_schema.json"))
         config = AstrBotConfig(str(Path(self.temp.name) / "plugin_config.json"), schema=schema)

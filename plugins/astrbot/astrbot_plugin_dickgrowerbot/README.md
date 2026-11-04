@@ -1,11 +1,11 @@
 # DickGrowerBot
 
-适用于 **AstrBot v4.29.4** 的 Telegram 游戏插件，版本 **v0.5.0**。移植原项目的六项功能，核心回复、菜单描述和按钮使用原项目中文文案，签到附加已确认的累计缩水提醒。中文语言文件随插件附带，统计回复省略固定的历史日期提示。
+适用于 **AstrBot v4.29.4** 的 Telegram 游戏插件，版本 **v0.5.2**。移植原项目的六项功能，核心回复、菜单描述和按钮使用原项目中文文案，签到附加已确认的累计缩水提醒。中文语言文件随插件附带，统计回复省略固定的历史日期提示。
 
 ## 安装
 
 1. 已安装旧「拼鸡鸡」插件时，先停用旧插件，避免相同指令被重复处理。
-2. 在 AstrBot 插件管理页面上传 `astrbot_plugin_dickgrowerbot-v0.5.0.zip` 并启用 **DickGrowerBot**。源码安装目录为 `AstrBot/data/plugins/astrbot_plugin_dickgrowerbot/`。
+2. 在 AstrBot 插件管理页面上传 `astrbot_plugin_dickgrowerbot-v0.5.2.zip` 并启用 **DickGrowerBot**。源码安装目录为 `AstrBot/data/plugins/astrbot_plugin_dickgrowerbot/`。
 3. 配置 AstrBot 的 Telegram 适配器，将机器人加入群聊，再发送 `/dick_grow`。
 
 要求 Python 3.12 或以上，AstrBot 元数据兼容范围为 `>=4.29.4,<5`，本地实际验证版本为 4.29.4。插件声明 PyYAML 依赖，Telegram SDK 由 AstrBot 提供。
@@ -13,6 +13,10 @@
 接管原机器人 Token 时，先停止原 bot 进程，再启用 AstrBot 接收更新。群消息接收权限及网络配置遵循 AstrBot 的 Telegram 接入说明。命令示例使用 `/`，实际前缀由 AstrBot 配置决定。[官方接入说明](https://docs.astrbot.app/platform/telegram.html)
 
 ## 本次更新
+
+v0.5.2 恢复插件根目录的 `logo.png`，使用公鸡与向上箭头图案；保留 v0.5.1 的中文简介。
+
+v0.5.1 将 AstrBot 插件列表中的简介改为中文，不改动游戏规则与命令。
 
 v0.5.0 将全部命令统一为 `/dick_` 前缀，其中今日评选仍为 `/dick_of_day`。按钮回调改为 `dick:*`，不再接收 `pinjj:*`；升级前发出的旧按钮将失效，需重新发送对应命令。数据库数据和旧版数据库自动复制不受影响。
 
