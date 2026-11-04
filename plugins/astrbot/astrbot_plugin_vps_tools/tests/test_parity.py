@@ -14,12 +14,24 @@ from xml.etree import ElementTree
 
 from astrbot_plugin_vps_tools import bgp_original, dig_original, ip_original, whois_original
 from astrbot_plugin_vps_tools.auto_delete import AutoDelete
+from astrbot_plugin_vps_tools.group_scope import group_allowed
 from astrbot_plugin_vps_tools.telegram_photo import send_bgp_photo
 from astrbot_plugin_vps_tools.telegram_text import finish_progress, ip_html, send_html, whois_html, whois_history_html
 from astrbot_plugin_vps_tools.whois_history import WhoisHistory
 
 
 class ParityTests(unittest.TestCase):
+    def test_group_scope_matches_happy_repeat_allow_and_deny_lists(self):
+        self.assertTrue(group_allowed("-123", [], []))
+        self.assertTrue(group_allowed(None, ["-123"], []))
+        self.assertTrue(group_allowed("-123#456", ["-123"], []))
+        self.assertTrue(group_allowed("-123#456", ["-123#456"], []))
+        self.assertFalse(group_allowed("-123#789", ["-123#456"], []))
+        self.assertFalse(group_allowed("-789", ["-123"], []))
+        self.assertFalse(group_allowed("-123#456", ["-123"], ["-123#456"]))
+        self.assertFalse(group_allowed("-123#456", ["-123#456"], ["-123"]))
+        self.assertTrue(group_allowed("-123#789", ["-123"], ["-123#456"]))
+
     def test_ip_api_request_and_original_result_layout(self):
         seen = {}
         class Response:

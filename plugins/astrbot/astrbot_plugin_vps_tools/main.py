@@ -19,6 +19,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from .auto_delete import AutoDelete
 from .bgp_original import extract_bgp_ip, fetch_bgp_dns, fetch_bgp_image
 from .dig_original import lookup_dig_native
+from .group_scope import group_allowed
 from .ip_original import query_ip
 from .queries import QueryError
 from .telegram_photo import send_bgp_photo
@@ -77,6 +78,7 @@ def _ip_from_text(text: str, *, ipv4_only: bool = False) -> str | None:
 class VpsTools(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config
         self.auto_delete = AutoDelete(config)
         data_dir = Path(get_astrbot_data_path()) / "plugin_data" / "astrbot_plugin_vps_tools"
         self.whois_history = WhoisHistory(data_dir)
@@ -97,9 +99,17 @@ class VpsTools(Star):
         return await send_bgp_photo(event, png, target, prefix,
                                     on_sent=self.auto_delete.schedule)
 
+    def _group_allowed(self, event: AstrMessageEvent) -> bool:
+        return group_allowed(event.get_group_id(),
+                             self.config.get("enabled_groups", []),
+                             self.config.get("disabled_groups", []))
+
     @filter.command("vps_ip")
     async def vps_ip(self, event: AstrMessageEvent):
         """查询 IP/域名归属地、ASN、代理与机房标记"""
+        if not self._group_allowed(event):
+            mark_handled(event)
+            return
         target = _args(event)
         if not target:
             reply = _reply_text(event)
@@ -134,6 +144,9 @@ class VpsTools(Star):
     @filter.command("vps_bgp")
     async def vps_bgp(self, event: AstrMessageEvent):
         """生成 BGP 路由图，或查询 bgp.tools 的 DNS 记录"""
+        if not self._group_allowed(event):
+            mark_handled(event)
+            return
         raw = _args(event)
         parts = raw.split(maxsplit=1)
         dns_mode = bool(parts and parts[0].lower() == "dns")
@@ -212,6 +225,9 @@ class VpsTools(Star):
     @filter.command("vps_whois")
     async def vps_whois(self, event: AstrMessageEvent):
         """查询 WHOIS、批量查询、历史和 24 小时缓存"""
+        if not self._group_allowed(event):
+            mark_handled(event)
+            return
         raw = _args(event)
         parts = raw.split()
         sub = parts[0].lower() if parts else ""
@@ -375,6 +391,9 @@ class VpsTools(Star):
     @filter.command("vps_dig")
     async def vps_dig(self, event: AstrMessageEvent):
         """调用系统 dig 查询 DNS，支持记录类型、服务器及常用选项"""
+        if not self._group_allowed(event):
+            mark_handled(event)
+            return
         target = _args(event)
         if not target:
             content = "❌ 未提供任何参数"
