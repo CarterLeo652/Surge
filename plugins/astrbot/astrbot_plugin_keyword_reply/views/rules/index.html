@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>关键词回复</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="page-header">
+      <div class="page-intro"><span class="app-mark" aria-hidden="true">✳</span><div><h1>关键词回复</h1><p>让机器人接住群里的常见问题。</p></div></div>
+      <div class="header-actions">
+        <span id="saveState" class="save-state" role="status" aria-live="polite"></span>
+        <button id="importRules" class="button button-quiet" type="button">导入</button>
+        <input id="importFile" type="file" accept=".json,application/json" hidden>
+        <button id="exportRules" class="button button-quiet" type="button">导出</button>
+        <button id="save" class="button button-primary" type="button">保存更改</button>
+      </div>
+    </header>
+    <div class="workspace">
+      <aside class="rules-panel" aria-label="规则列表">
+        <div class="panel-heading"><div><h2>规则</h2><span id="count" class="count">0</span></div><button id="add" class="button button-small" type="button">＋ 新建</button></div>
+        <label class="search-box"><span class="search-icon" aria-hidden="true">⌕</span><span class="sr-only">搜索规则</span><input id="ruleSearch" type="search" placeholder="搜索关键词或群 ID" autocomplete="off"></label>
+        <div class="filter-row" role="group" aria-label="筛选规则">
+          <button type="button" data-filter="all" class="filter active" aria-pressed="true">全部</button>
+          <button type="button" data-filter="enabled" class="filter" aria-pressed="false">已启用</button>
+          <button type="button" data-filter="disabled" class="filter" aria-pressed="false">已停用</button>
+        </div>
+        <div id="ruleList" class="rule-list"></div>
+      </aside>
+      <section class="editor-panel" aria-label="编辑规则"><div id="editor" class="editor"></div></section>
+      <aside class="preview-panel" aria-label="回复预览"><div class="preview-sticky"><div class="preview-title"><h2>回复预览</h2><span>仅展示，不发送</span></div><div id="preview" class="chat-preview"></div><p class="preview-footnote">实际发送由群消息、匹配条件和机器人权限决定。</p></div></aside>
+    </div>
+  </main>
+  <dialog id="deleteDialog" class="confirm-dialog" aria-labelledby="deleteTitle"><form method="dialog"><div class="dialog-icon" aria-hidden="true">!</div><h2 id="deleteTitle">删除这条规则？</h2><p id="deleteDescription">删除后，点击“保存更改”才会生效。</p><div class="dialog-actions"><button class="button button-quiet" value="cancel">取消</button><button class="button button-danger" value="delete">删除规则</button></div></form></dialog>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

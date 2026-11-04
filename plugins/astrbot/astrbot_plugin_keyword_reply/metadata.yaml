@@ -1,0 +1,7 @@
+name: astrbot_plugin_keyword_reply
+display_name: 关键词回复
+desc: Telegram 群关键词自动回复，支持可视化规则、随机媒体回复、匹配条件和消息动作。
+version: v1.0.5
+author: Codex
+support_platforms:
+  - telegram
