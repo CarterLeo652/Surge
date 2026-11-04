@@ -45,11 +45,11 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.background.run_daily_once()
 
     async def test_cleanup_menu_rejects_non_admin_and_requires_owner(self):
-        await self.plugin.cleanup(self.command_event(2, "/cleanup"))
+        await self.plugin.cleanup(self.command_event(2, "/dick_cleanup"))
         self.assertEqual(
             self.calls("sendMessage")[-1]["text"], tr("commands.cleanup.errors.admins_only")
         )
-        await self.plugin.cleanup(self.command_event(1, "/cleanup", message_id=20))
+        await self.plugin.cleanup(self.command_event(1, "/dick_cleanup", message_id=20))
         payload = self.calls("sendMessage")[-1]
         self.assertTrue(payload["text"].startswith(tr("commands.cleanup.state.header")))
         self.assertEqual(len(payload["reply_markup"]["inline_keyboard"]), 5)
@@ -62,7 +62,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.maintenance.cleanup(self.scope)["notice"], 0)
 
     async def test_cleanup_picker_and_role_recheck_update_existing_message(self):
-        await self.plugin.cleanup(self.command_event(1, "/cleanup"))
+        await self.plugin.cleanup(self.command_event(1, "/dick_cleanup"))
         token = self.calls("sendMessage")[-1]["reply_markup"]["inline_keyboard"][1][0][
             "callback_data"
         ]
@@ -84,7 +84,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_bot_rights_shows_original_confirmation_before_saving(self):
         self.request.members[12345] = {"status": "member"}
-        await self.plugin.cleanup(self.command_event(1, "/cleanup"))
+        await self.plugin.cleanup(self.command_event(1, "/dick_cleanup"))
         token = self.calls("sendMessage")[-1]["reply_markup"]["inline_keyboard"][1][0][
             "callback_data"
         ]
@@ -105,7 +105,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.maintenance.set_cleanup(self.scope, "report", 5)
         self.plugin.maintenance.set_cleanup(self.scope, "application", 1)
         before = self.plugin.maintenance.cleanup(self.scope)
-        await self.plugin.cleanup(self.command_event(1, "/cleanup", message_id=20))
+        await self.plugin.cleanup(self.command_event(1, "/dick_cleanup", message_id=20))
         payload = self.calls("sendMessage")[-1]
         button = payload["reply_markup"]["inline_keyboard"][-1][0]
         self.assertEqual(button["text"], "✖️ 关闭")
@@ -119,7 +119,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls("deleteMessage")), 1)
 
     async def test_close_cleanup_requires_menu_owner_and_current_admin_role(self):
-        await self.plugin.cleanup(self.command_event(1, "/cleanup"))
+        await self.plugin.cleanup(self.command_event(1, "/dick_cleanup"))
         token = self.calls("sendMessage")[-1]["reply_markup"]["inline_keyboard"][-1][0][
             "callback_data"
         ]
@@ -137,7 +137,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_cleanup_old_menu_removes_keyboard_when_delete_is_refused(self):
         self.request.members[12345] = {"status": "member"}
-        await self.plugin.cleanup(self.command_event(1, "/cleanup"))
+        await self.plugin.cleanup(self.command_event(1, "/dick_cleanup"))
         pick = self.calls("sendMessage")[-1]["reply_markup"]["inline_keyboard"][1][0][
             "callback_data"
         ]
@@ -155,7 +155,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_cleanup_permission_warning_and_already_deleted_menu(self):
         self.request.members[12345] = {"status": "member"}
-        await self.plugin.cleanup(self.command_event(1, "/cleanup"))
+        await self.plugin.cleanup(self.command_event(1, "/dick_cleanup"))
         pick = self.calls("sendMessage")[-1]["reply_markup"]["inline_keyboard"][1][0][
             "callback_data"
         ]
@@ -177,7 +177,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
     async def test_report_deletion_includes_command_and_survives_plugin_reload(self):
         self.seed(1)
         self.plugin.maintenance.set_cleanup(self.scope, "report", 1)
-        await self.plugin.top(self.command_event(1, "/top", message_id=10))
+        await self.plugin.top(self.command_event(1, "/dick_top", message_id=10))
         self.assertEqual(len(self.table("deletion_jobs")), 2)
         self.clock.now += 60
         reopened = DickGrowerBotPlugin(SimpleNamespace(), {})
@@ -191,7 +191,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
     async def test_without_bot_delete_rights_only_own_reply_is_queued(self):
         self.request.members[12345] = {"status": "member"}
         self.plugin.maintenance.set_cleanup(self.scope, "report", 1)
-        await self.plugin.top(self.command_event(1, "/top"))
+        await self.plugin.top(self.command_event(1, "/dick_top"))
         self.assertEqual([row["target"] for row in self.table("deletion_jobs")], ["reply"])
         self.clock.now += 60
         await self.plugin.background.run_queue_once()
@@ -214,7 +214,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
         with self.plugin.game.transaction() as db:
             db.execute("UPDATE players SET length=-20")
         self.plugin.maintenance.set_cleanup(self.scope, "event", 1)
-        await self.plugin.loan(self.command_event(1, "/loan", message_id=200))
+        await self.plugin.loan(self.command_event(1, "/dick_loan", message_id=200))
         self.assertEqual(self.table("deletion_jobs"), [])
         button = self.calls("sendMessage")[-1]["reply_markup"]["inline_keyboard"][0][0]
         await self.plugin.loan_clicked(await self.click_event(1, button["callback_data"], 1001))
@@ -224,7 +224,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_retry_after_wait_and_already_deleted_message(self):
         self.plugin.maintenance.set_cleanup(self.scope, "report", 1)
         self.request.members[12345] = {"status": "member"}
-        await self.plugin.top(self.command_event(1, "/top"))
+        await self.plugin.top(self.command_event(1, "/dick_top"))
         self.clock.now += 60
         self.request.fail_once = "deleteMessage"
         self.request.fail_with = RetryAfter(10)
@@ -238,7 +238,7 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lost_delete_permission_preserves_command_but_cleans_reply(self):
         self.plugin.maintenance.set_cleanup(self.scope, "report", 1)
-        await self.plugin.top(self.command_event(1, "/top"))
+        await self.plugin.top(self.command_event(1, "/dick_top"))
         self.request.members[12345] = {"status": "member"}
         self.clock.now += 60
         await self.plugin.background.run_queue_once()
@@ -289,23 +289,23 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls("sendMessage"), [])
         self.assertEqual(self.plugin.maintenance.pending_loss(self.scope, "1"), 5)
         self.plugin.maintenance.set_cleanup(self.scope, "event", 1)
-        await self.plugin.grow(self.command_event(1, "/grow", message_id=300))
+        await self.plugin.grow(self.command_event(1, "/dick_grow", message_id=300))
         payload = self.calls("sendMessage")[-1]
         self.assertTrue(payload["text"].endswith("太久没签到了，你的鸡鸡累计缩水了 5 厘米。"))
         self.assertEqual(self.plugin.maintenance.pending_loss(self.scope, "1"), 0)
         self.assertEqual([job["target"] for job in self.table("deletion_jobs")], ["reply"])
-        await self.plugin.grow(self.command_event(1, "/grow", message_id=301))
+        await self.plugin.grow(self.command_event(1, "/dick_grow", message_id=301))
         self.assertNotIn("累计缩水", self.calls("sendMessage")[-1]["text"])
 
     async def test_failed_grow_send_keeps_reminder_for_next_attempt_after_restart(self):
         await self.prepare_shrink()
         self.request.fail_once = "sendMessage"
-        await self.plugin.grow(self.command_event(1, "/grow", message_id=300))
+        await self.plugin.grow(self.command_event(1, "/dick_grow", message_id=300))
         self.assertEqual(self.plugin.maintenance.pending_loss(self.scope, "1"), 2)
         checkins = self.plugin.game.stats(self.scope, "1")["checkins"]
         reopened = DickGrowerBotPlugin(SimpleNamespace(), {})
         reopened.game.clock = self.clock
-        await reopened.grow(self.command_event(1, "/grow", message_id=301))
+        await reopened.grow(self.command_event(1, "/dick_grow", message_id=301))
         self.assertIn("累计缩水了 2 厘米", self.calls("sendMessage")[-1]["text"])
         self.assertEqual(reopened.maintenance.pending_loss(self.scope, "1"), 0)
         self.assertEqual(reopened.game.stats(self.scope, "1")["checkins"], checkins)
@@ -313,8 +313,8 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_grow_replies_show_pending_loss_once(self):
         await self.prepare_shrink()
         await asyncio.gather(
-            self.plugin.grow(self.command_event(1, "/grow", message_id=300)),
-            self.plugin.grow(self.command_event(1, "/grow", message_id=301)),
+            self.plugin.grow(self.command_event(1, "/dick_grow", message_id=300)),
+            self.plugin.grow(self.command_event(1, "/dick_grow", message_id=301)),
         )
         self.assertEqual(sum("累计缩水" in call["text"] for call in self.calls("sendMessage")), 1)
         self.assertEqual(self.plugin.maintenance.pending_loss(self.scope, "1"), 0)
@@ -322,10 +322,10 @@ class BackgroundTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_other_players_and_commands_leave_reminder_for_owner(self):
         await self.prepare_shrink()
-        await self.plugin.grow(self.command_event(2, "/grow", message_id=300))
-        await self.plugin.stats(self.command_event(1, "/stats", message_id=301))
-        await self.plugin.top(self.command_event(1, "/top", message_id=302))
+        await self.plugin.grow(self.command_event(2, "/dick_grow", message_id=300))
+        await self.plugin.stats(self.command_event(1, "/dick_stats", message_id=301))
+        await self.plugin.top(self.command_event(1, "/dick_top", message_id=302))
         self.assertTrue(all("累计缩水" not in p["text"] for p in self.calls("sendMessage")))
         self.assertEqual(self.plugin.maintenance.pending_loss(self.scope, "1"), 2)
-        await self.plugin.grow(self.command_event(1, "/grow", message_id=303))
+        await self.plugin.grow(self.command_event(1, "/dick_grow", message_id=303))
         self.assertIn("累计缩水了 2 厘米", self.calls("sendMessage")[-1]["text"])

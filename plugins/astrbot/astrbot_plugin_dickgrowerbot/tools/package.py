@@ -4,7 +4,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 root = Path(__file__).resolve().parents[1]
-out = root / "dist" / "astrbot_plugin_dickgrowerbot-v0.4.2.zip"
+out = root / "dist" / "astrbot_plugin_dickgrowerbot-v0.5.0.zip"
 out.parent.mkdir(exist_ok=True)
 include = [
     "__init__.py",

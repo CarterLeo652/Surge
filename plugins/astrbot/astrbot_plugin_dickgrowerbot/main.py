@@ -62,9 +62,9 @@ class DickGrowerBotPlugin(Star):
 
     @staticmethod
     def button(label, action, data):
-        # 使用 AstrBot 原生持久化回调路由，插件重载后旧按钮仍能正确结算。
+        # 使用 AstrBot 原生持久化回调路由，插件重载后本版按钮仍能正确结算。
         return InlineKeyboardButton(
-            label, callback_data=encode_button_callback(f"pinjj:{action}", data)
+            label, callback_data=encode_button_callback(f"dick:{action}", data)
         )
 
     def top_buttons(self, scope, result):
@@ -174,7 +174,7 @@ class DickGrowerBotPlugin(Star):
         return data
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.command("grow")
+    @filter.command("dick_grow")
     async def grow(self, event: AstrMessageEvent):
         """让你的丁丁变大！"""
 
@@ -208,7 +208,7 @@ class DickGrowerBotPlugin(Star):
         await self.execute(event, action)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.command("pvp")
+    @filter.command("dick_pvp")
     async def pvp(self, event: AstrMessageEvent, bet: str = ""):
         """斗鸡！"""
 
@@ -239,7 +239,7 @@ class DickGrowerBotPlugin(Star):
         await self.execute(event, action)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.button_action("pinjj:pk")
+    @filter.button_action("dick:pk")
     async def pk_clicked(self, event: AstrMessageEvent):
         async def action(update, user, chat, scope):
             data = self.callback_data(event, scope)
@@ -279,7 +279,7 @@ class DickGrowerBotPlugin(Star):
         await self.execute(event, action)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.command("loan")
+    @filter.command("dick_loan")
     async def loan(self, event: AstrMessageEvent):
         """负数？申请贷款！"""
 
@@ -322,7 +322,7 @@ class DickGrowerBotPlugin(Star):
         await self.execute(event, action)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.button_action("pinjj:loan")
+    @filter.button_action("dick:loan")
     async def loan_clicked(self, event: AstrMessageEvent):
         async def action(update, user, chat, scope):
             data = self.callback_data(event, scope)
@@ -354,7 +354,7 @@ class DickGrowerBotPlugin(Star):
         await self.execute(event, action)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.command("stats")
+    @filter.command("dick_stats")
     async def stats(self, event: AstrMessageEvent):
         """统计"""
 
@@ -369,7 +369,7 @@ class DickGrowerBotPlugin(Star):
         await self.execute(event, action, private=True)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.button_action("pinjj:stats")
+    @filter.button_action("dick:stats")
     async def stats_clicked(self, event: AstrMessageEvent):
         async def action(update, user, chat, scope):
             self.callback_data(event, scope)
@@ -382,7 +382,7 @@ class DickGrowerBotPlugin(Star):
         await self.execute(event, action)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.command("top")
+    @filter.command("dick_top")
     async def top(self, event: AstrMessageEvent, page: str = "1"):
         """获取聊天中最大的丁丁"""
 
@@ -398,7 +398,7 @@ class DickGrowerBotPlugin(Star):
         await self.execute(event, action)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.button_action("pinjj:top")
+    @filter.button_action("dick:top")
     async def top_clicked(self, event: AstrMessageEvent):
         async def action(update, user, chat, scope):
             data = self.callback_data(event, scope)
@@ -496,7 +496,7 @@ class DickGrowerBotPlugin(Star):
             raise GameError(tr("commands.cleanup.errors.admins_only"))
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.command("cleanup")
+    @filter.command("dick_cleanup")
     async def cleanup(self, event: AstrMessageEvent):
         """设置我的消息在本群留多久"""
 
@@ -508,7 +508,7 @@ class DickGrowerBotPlugin(Star):
         await self.execute(event, action)
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.TELEGRAM)
-    @filter.button_action("pinjj:cleanup")
+    @filter.button_action("dick:cleanup")
     async def cleanup_clicked(self, event: AstrMessageEvent):
         async def action(update, user, chat, scope):
             data = self.callback_data(event, scope)

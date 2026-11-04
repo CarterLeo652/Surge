@@ -14,7 +14,7 @@ from unittest.mock import patch
 HAS_ASTRBOT = importlib.util.find_spec("astrbot") is not None
 
 if HAS_ASTRBOT:
-    _runtime = tempfile.TemporaryDirectory(prefix="pinjj-astrbot-test-")
+    _runtime = tempfile.TemporaryDirectory(prefix="dick-astrbot-test-")
     atexit.register(_runtime.cleanup)
     with patch.dict(os.environ, {"ASTRBOT_ROOT": _runtime.name}):
         from astrbot.api import AstrBotConfig
@@ -73,7 +73,7 @@ if HAS_ASTRBOT:
                     "id": 12345,
                     "is_bot": True,
                     "first_name": "首席增鸡师",
-                    "username": "pinjj_test_bot",
+                    "username": "dick_test_bot",
                 }
             elif action == "getChatMember":
                 uid = int(params["user_id"])
@@ -217,7 +217,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         return self.plugin.game.grow(self.scope, str(uid), f"鸡友{uid}", f"seed{uid}")
 
     async def make_pk(self):
-        event = self.command_event(1, "/pvp 5", 100)
+        event = self.command_event(1, "/dick_pvp 5", 100)
         await self.plugin.pvp(event, "5")
         payload = self.calls("sendMessage")[-1]
         button = payload["reply_markup"]["inline_keyboard"][0][0]
@@ -247,17 +247,25 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             actions,
             {
-                "pinjj:pk",
-                "pinjj:top",
-                "pinjj:stats",
-                "pinjj:loan",
-                "pinjj:cleanup",
+                "dick:pk",
+                "dick:top",
+                "dick:stats",
+                "dick:loan",
+                "dick:cleanup",
             },
         )
         commands = [f for h in handlers for f in h.event_filters if isinstance(f, CommandFilter)]
         self.assertEqual(
             {f.command_name for f in commands},
-            {"grow", "pvp", "stats", "top", "dick_of_day", "loan", "cleanup"},
+            {
+                "dick_grow",
+                "dick_pvp",
+                "dick_stats",
+                "dick_top",
+                "dick_of_day",
+                "dick_loan",
+                "dick_cleanup",
+            },
         )
         for command in commands:
             self.assertFalse(command.alias)
@@ -268,13 +276,13 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {item.command: item.description for item in menu},
             {
-                "grow": "让你的丁丁变大！",
-                "top": "获取聊天中最大的丁丁",
+                "dick_grow": "让你的丁丁变大！",
+                "dick_top": "获取聊天中最大的丁丁",
                 "dick_of_day": "选举今日丁丁",
-                "pvp": "斗鸡！",
-                "loan": "负数？申请贷款！",
-                "stats": "统计",
-                "cleanup": "设置我的消息在本群留多久",
+                "dick_pvp": "斗鸡！",
+                "dick_loan": "负数？申请贷款！",
+                "dick_stats": "统计",
+                "dick_cleanup": "设置我的消息在本群留多久",
             },
         )
 
@@ -291,7 +299,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(schema), {"refresh_hours"})
 
     async def test_grow_preserves_forum_topic_and_stops_model_pipeline(self):
-        event = self.command_event(1, "/grow", topic=42)
+        event = self.command_event(1, "/dick_grow", topic=42)
         await self.plugin.grow(event)
         payload = self.calls("sendMessage")[-1]
         self.assertEqual(payload["message_thread_id"], 42)
@@ -305,9 +313,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         token, message = await self.make_pk()
         self.assertLessEqual(len(token.encode()), 64)
         action_id, _ = decode_button_callback(token)
-        self.assertEqual(action_id, "pinjj:pk")
+        self.assertEqual(action_id, "dick:pk")
         event = await self.click_event(2, token, message)
-        self.assertTrue(ButtonActionFilter("pinjj:pk").filter(event, {}))
+        self.assertTrue(ButtonActionFilter("dick:pk").filter(event, {}))
         await self.plugin.pk_clicked(event)
         edit = self.calls("editMessageText")[-1]
         self.assertEqual(edit["message_id"], message)
@@ -315,13 +323,13 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(edit["text"].startswith("胜利者是<b>"))
         self.assertEqual(sum(self.plugin.game.stats(self.scope, str(i))["wins"] for i in [1, 2]), 1)
 
-    async def test_reload_keeps_old_buttons_and_same_message_is_not_resent(self):
+    async def test_reload_keeps_current_buttons_and_same_message_is_not_resent(self):
         self.seed(1)
         self.seed(2)
         token, message = await self.make_pk()
         count = len(self.calls("sendMessage"))
         self.plugin = DickGrowerBotPlugin(SimpleNamespace(), {})
-        await self.plugin.pvp(self.command_event(1, "/pvp 5", 100), "5")
+        await self.plugin.pvp(self.command_event(1, "/dick_pvp 5", 100), "5")
         self.assertEqual(len(self.calls("sendMessage")), count)
         event = await self.click_event(2, token, message)
         await self.plugin.pk_clicked(event)
@@ -371,7 +379,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_leaderboard_buttons_edit_in_place(self):
         self.seed(1)
         self.seed(2)
-        await self.plugin.top(self.command_event(1, "/top"))
+        await self.plugin.top(self.command_event(1, "/dick_top"))
         payload = self.calls("sendMessage")[-1]
         button = payload["reply_markup"]["inline_keyboard"][0][0]
         event = await self.click_event(1, button["callback_data"], 1001)
@@ -381,14 +389,14 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bad_amount_has_chinese_prompt(self):
         self.seed(1)
-        await self.plugin.pvp(self.command_event(1, "/pvp wrong"), "wrong")
+        await self.plugin.pvp(self.command_event(1, "/dick_pvp wrong"), "wrong")
         self.assertEqual("发起斗鸡要下注。", self.calls("sendMessage")[-1]["text"])
 
     async def test_loan_confirmation_buttons_and_owner_check(self):
         self.seed(1)
         with self.plugin.game.transaction() as db:
             db.execute("UPDATE players SET length=-20")
-        await self.plugin.loan(self.command_event(1, "/loan", message_id=200))
+        await self.plugin.loan(self.command_event(1, "/dick_loan", message_id=200))
         payload = self.calls("sendMessage")[-1]
         self.assertEqual(
             payload["text"],
@@ -414,7 +422,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.seed(1)
         with self.plugin.game.transaction() as db:
             db.execute("UPDATE players SET length=-10")
-        await self.plugin.loan(self.command_event(1, "/loan", message_id=201))
+        await self.plugin.loan(self.command_event(1, "/dick_loan", message_id=201))
         buttons = self.calls("sendMessage")[-1]["reply_markup"]["inline_keyboard"][0]
         with self.plugin.game.connect() as db:
             message = int(db.execute("SELECT message_id FROM loan_offers").fetchone()[0])
@@ -441,7 +449,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stats_private_uses_upstream_cross_chat_summary(self):
         self.seed(1)
-        event = self.command_event(1, "/stats", message_id=400, chat_id=1)
+        event = self.command_event(1, "/dick_stats", message_id=400, chat_id=1)
         update = event.message_obj.raw_message
         raw = update.to_dict()
         raw["message"]["chat"]["type"] = "private"
